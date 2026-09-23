@@ -57,7 +57,7 @@ class ActorsHQDataset(Dataset):
         elif self.return_type == "video":
             self.rgb_list, self.msk_list = self._load_image_dataset()
     
-    def _load_camera_dataset(self):
+    def _load_camera_dataset(self) -> tuple[list[Camera], float]:
         with open(self.camera_path, "r") as json_file:
             contents = json.load(json_file)
         cameras = []
@@ -71,7 +71,9 @@ class ActorsHQDataset(Dataset):
             k[1][1] *= scale_y
             k[1][2] *= scale_y
             w2c = np.linalg.inv(np.array(c2w))
-            cam = Camera(camera_id=camera_id, w=w, h=h, k=k, w2c=w2c, near=1, far=10, data_device="cuda")
+            near, far = cam_info.get("clip_planes", (1.0, 10.0))
+            assert 0 < near < far, (camera_id, near, far)
+            cam = Camera(camera_id=camera_id, w=w, h=h, k=k, w2c=w2c, near=near, far=far, data_device="cuda")
             cameras.append(cam)
             cam_centers.append(c2w[:3, 3])
         cam_centers = np.array(cam_centers)

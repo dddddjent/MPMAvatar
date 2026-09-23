@@ -1,5 +1,4 @@
 import warp as wp
-import warp.torch
 import torch
 from typing import Optional, Union, Sequence, Any
 from torch import Tensor
@@ -53,7 +52,7 @@ class MPMStateStruct:
         n_particles: int,
         n_elements: int,
         n_vertices: int,
-        device: wp.context.Devicelike = None,
+        device: str | wp.Device | None = None,
         requires_grad=False,
     ) -> None:
         n_no_vertices = n_particles - n_vertices
@@ -134,7 +133,7 @@ class MPMStateStruct:
         )
 
     def init_grid(
-        self, grid_res: int, device: wp.context.Devicelike = None, requires_grad=False
+        self, grid_res: int, device: str | wp.Device | None = None, requires_grad=False
     ):
         self.grid_m = wp.zeros(
             (grid_res, grid_res, grid_res),
@@ -543,7 +542,7 @@ class MPMSmallStateStruct:
         n_particles: int,
         n_elements: int,
         n_vertices: int,
-        device: wp.context.Devicelike = None,
+        device: str | wp.Device | None = None,
         requires_grad=False,
     ) -> None:
         # shape default is int. number of particles
@@ -647,7 +646,7 @@ class MPMModelStruct(object):
     def init(
         self,
         shape: Union[Sequence[int], int],
-        device: wp.context.Devicelike = None,
+        device: str | wp.Device | None = None,
         requires_grad=False,
     ) -> None:
         self.E = wp.zeros(
@@ -963,7 +962,7 @@ def set_value_to_float_array(target_array: wp.array(dtype=float), value: float):
 
 @wp.kernel
 def set_warpvalue_to_float_array(
-    target_array: wp.array(dtype=float), value: warp.types.float32
+    target_array: wp.array(dtype=float), value: wp.float32
 ):
     tid = wp.tid()
     target_array[tid] = value
@@ -991,85 +990,3 @@ def copy_state(
     if tid < d_length:
         source_state.particle_d[tid] = target_state.particle_d[tid]
         source_state.particle_R_inv[tid] = particle_R_inv[tid]
-
-def torch2warp_quat(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
-    assert t.is_contiguous()
-    if t.dtype != torch.float32 and t.dtype != torch.int32:
-        raise RuntimeError(
-            "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
-        )
-    assert t.shape[1] == 4
-    a = warp.types.array(
-        ptr=t.data_ptr(),
-        dtype=wp.quat,
-        shape=t.shape[0],
-        copy=False,
-        owner=False,
-        requires_grad=t.requires_grad,
-        # device=t.device.type)
-        device=dvc,
-    )
-    a.tensor = t
-    return a
-
-
-def torch2warp_float(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
-    assert t.is_contiguous()
-    if t.dtype != torch.float32 and t.dtype != torch.int32:
-        raise RuntimeError(
-            "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
-        )
-    a = warp.types.array(
-        ptr=t.data_ptr(),
-        dtype=warp.types.float32,
-        shape=t.shape[0],
-        copy=False,
-        owner=False,
-        requires_grad=t.requires_grad,
-        # device=t.device.type)
-        device=dvc,
-    )
-    a.tensor = t
-    return a
-
-
-def torch2warp_vec3(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
-    assert t.is_contiguous()
-    if t.dtype != torch.float32 and t.dtype != torch.int32:
-        raise RuntimeError(
-            "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
-        )
-    assert t.shape[1] == 3
-    a = warp.types.array(
-        ptr=t.data_ptr(),
-        dtype=wp.vec3,
-        shape=t.shape[0],
-        copy=False,
-        owner=False,
-        requires_grad=t.requires_grad,
-        # device=t.device.type)
-        device=dvc,
-    )
-    a.tensor = t
-    return a
-
-
-def torch2warp_mat33(t, copy=False, dtype=warp.types.float32, dvc="cuda:0"):
-    assert t.is_contiguous()
-    if t.dtype != torch.float32 and t.dtype != torch.int32:
-        raise RuntimeError(
-            "Error aliasing Torch tensor to Warp array. Torch tensor must be float32 or int32 type"
-        )
-    assert t.shape[1] == 3
-    a = warp.types.array(
-        ptr=t.data_ptr(),
-        dtype=wp.mat33,
-        shape=t.shape[0],
-        copy=False,
-        owner=False,
-        requires_grad=t.requires_grad,
-        # device=t.device.type)
-        device=dvc,
-    )
-    a.tensor = t
-    return a

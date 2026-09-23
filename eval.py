@@ -65,8 +65,8 @@ for frame in tqdm(frames, desc="Appearance"):
         cams = ["0004"]
 
     for cam in cams:
-        img_pred = torch.from_numpy(np.array(Image.open(os.path.join(args.output_path, cam, "pred", f"{frame:04d}.png"))).astype(np.float32).transpose(2,0,1)).contiguous().cuda() / 255.
-        img_gt = torch.from_numpy(np.array(Image.open(os.path.join(args.output_path, cam, "gt", f"{frame:04d}.png"))).astype(np.float32).transpose(2,0,1)).contiguous().cuda() / 255.
+        img_pred = torch.from_numpy(np.array(Image.open(os.path.join(args.output_path, "fitted_appearance", cam, "pred", f"{frame:04d}.png"))).astype(np.float32).transpose(2,0,1)).contiguous().cuda() / 255.
+        img_gt = torch.from_numpy(np.array(Image.open(os.path.join(args.output_path, "fitted_appearance", cam, "gt", f"{frame:04d}.png"))).astype(np.float32).transpose(2,0,1)).contiguous().cuda() / 255.
         
         if args.dataset == "actorshq":
             mask_gt = np.array(Image.open(os.path.join(args.data_path, f"masks/{cam}/{cam}_mask{frame:06d}.png"))).astype(np.float32) / 255.

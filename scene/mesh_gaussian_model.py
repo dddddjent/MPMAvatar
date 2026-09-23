@@ -20,6 +20,7 @@ from glob import glob
 from tqdm import tqdm
 from torch import nn
 from PIL import Image
+from typing import Any
 
 class MeshGaussianModel(GaussianModel):
     def __init__(self, sh_degree : int, device):
@@ -168,6 +169,18 @@ class MeshGaussianModel(GaussianModel):
                 lr = self.verts_scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr
+
+    def capture_training(self) -> dict[str, Any]:
+        return {"gaussians": super().capture(), "verts_offset": self.verts_offset,
+                "cam_m": self.cam_m, "cam_c": self.cam_c,
+                "shadow_net": self.shadow_net.state_dict()}
+
+    def restore_training(self, state: dict[str, Any], training_args: Any) -> None:
+        self.verts_offset = state["verts_offset"]
+        self.cam_m, self.cam_c = state["cam_m"], state["cam_c"]
+        self.shadow_net.load_state_dict(state["shadow_net"])
+        # Rebuild all optimizer groups only after installing their saved parameters.
+        super().restore(state["gaussians"], training_args)
 
     def save_ply(self, path, for_viewer=True):
         super().save_ply(path)

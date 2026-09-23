@@ -14,6 +14,8 @@ from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from time import time
+from pathlib import Path
+from typing import Any
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -46,7 +48,9 @@ def convert_SH(
 
     return colors_precomp
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations):
+def training(dataset: Any, opt: Any, pipe: Any, testing_iterations: list[int],
+             saving_iterations: list[int], start_checkpoint: str | None,
+             checkpoint_iterations: list[int]) -> None:
     tb_writer = prepare_output_and_logger(dataset)
 
     gaussians = MeshGaussianModel(dataset.sh_degree, device="cuda")
@@ -86,17 +90,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
 
     loss_weights = {"scale": 1.0, "iso": 20, "normal": 0.1, "eq_faces_weight": 1000, "opacity": 0.05, "area": 50, "scale_ratio": 10, "scale_edge_ratio": 1000, "scale_edge_ratio_var": 1, "scale_max": 1000, "offset": 1., "tv": 1., "laplacian": 5., 'xyz': 1.0}
     
-    gaussians.training_setup(opt)
+    first_iteration = 0
+    context = {"dataset": vars(dataset), "optimization": vars(opt)}
+    if start_checkpoint:
+        # Our training checkpoint includes NumPy scalars from the scene radius/LRs.
+        state = torch.load(start_checkpoint, weights_only=False)
+        assert state["context"] == context, "Resume requires the same appearance fitting settings"
+        gaussians.restore_training(state["model"], opt)
+        first_iteration = state["iteration"]
+        bg = state["background"]
+        torch.set_rng_state(state["rng_cpu"].cpu())
+        torch.cuda.set_rng_state_all([value.cpu() for value in state["rng_cuda"]])
+        print(f"Resuming appearance after iteration {first_iteration} with optimizer state", flush=True)
+    else:
+        gaussians.training_setup(opt)
 
     tb_image_idx = np.linspace(0, scene.test_frame_num-1, 5).astype(np.int32)
 
     iterations = opt.iterations
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(iterations), desc=f"Training progress")
+    progress_bar = tqdm(total=iterations, initial=first_iteration, desc="Training progress")
     
     total_update_spent_time = 0
     update_spent_time = 0
-    for iteration in range(1, iterations+1):
+    for iteration in range(first_iteration + 1, iterations+1):
         iter_start.record()
         data = next(train_dataloader)
         cam = data["cam"][0]
@@ -163,7 +180,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
-                progress_bar.update(10)
+            progress_bar.update(1)
             
             if iteration == iterations:
                 progress_bar.close()
@@ -260,10 +277,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations):
             gaussians.optimizer.step()
             gaussians.optimizer.zero_grad(set_to_none = True)
 
-            if iteration in saving_iterations:
+            if iteration % 1000 == 0 or iteration in checkpoint_iterations or iteration in saving_iterations or iteration == iterations:
+                temporary = Path(dataset.model_path) / "training_state.pt.tmp"
+                torch.save({"iteration": iteration, "model": gaussians.capture_training(),
+                            "context": context, "background": bg,
+                            "rng_cpu": torch.get_rng_state(),
+                            "rng_cuda": torch.cuda.get_rng_state_all()}, temporary)
+                temporary.replace(Path(dataset.model_path) / "training_state.pt")
+
+            if iteration in saving_iterations or iteration == iterations:
                 print(f"\n[Iteration {iteration}] Saving Gaussians")
                 point_cloud_path = os.path.join(dataset.model_path, f"point_cloud/timestep_{iteration:06d}")
                 gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+
+    if tb_writer:
+        tb_writer.close()
+    if first_iteration == iterations:
+        # A stop after the final training checkpoint may precede the PLY export.
+        gaussians.save_ply(os.path.join(dataset.model_path, f"point_cloud/timestep_{iterations:06d}/point_cloud.ply"))
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -313,7 +344,8 @@ if __name__ == "__main__":
 
     # Start GUI server, configure and run training
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations,
+             args.save_iterations, args.start_checkpoint, args.checkpoint_iterations)
 
     # All done
     print("\nTraining complete.")
