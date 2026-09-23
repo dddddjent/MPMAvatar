@@ -13,6 +13,8 @@ from dataset_input import common_arguments, load_manifest
 # python run.py --data ../data/MPMAvatar/ClothTransformer/sim_00000 --output output/ClothTransformer/sim_00000 --stage appearance --appearance-iterations 30000 --material-iterations 200 --material-frames all --grid-size 200 --substeps 400
 # Run --stage material after appearance; run --stage evaluate after material fitting.
 # Evaluation-only optional flags: --checkpoint /path/to/material.npz --evaluate-from-start --skip-render --skip-video.
+# Reuse appearance: --appearance-model /path/to/baseline/appearance (material/evaluate only).
+# Fixed-beta evaluation: --render-appearance gt_lighting.
 
 
 def main() -> None:
@@ -21,6 +23,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stage", choices=("appearance", "material", "evaluate"), required=True)
     parser.add_argument("--appearance-iterations", type=int, default=30000)
+    parser.add_argument("--appearance-model", type=Path,
+                        help="Existing appearance directory to reuse for material/evaluate; default: <output>/appearance")
     parser.add_argument("--material-iterations", type=int, default=200)
     parser.add_argument("--material-frames", default="all", help="all (the manifest's complete training prefix), or a count from 2 to its length")
     parser.add_argument("--grid-size", type=int, default=200)
@@ -28,15 +32,19 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path,
                         help="Evaluation material checkpoint; default: highest last_param iteration in <output>/material/seed0")
     parser.add_argument("--evaluate-from-start", action="store_true",
-                        help="Save, score and render every frame from frame 0, including the training prefix")
+                        help="Render a rollout from frame 0; error always uses a separate rollout from the first evaluation frame")
     parser.add_argument("--skip-render", action="store_true")
     parser.add_argument("--skip-video", action="store_true")
+    parser.add_argument("--render-appearance", choices=("both", "gt_lighting"), default="both",
+                        help="Evaluation videos: both branches, or source materials/lighting only")
     parser.add_argument("--resume-parameters", action="store_true",
                         help="One-time material resume from old NPZ files, resetting Adam and the LR schedule")
     args = parser.parse_args()
     assert args.stage == "evaluate" or args.checkpoint is None, "--checkpoint is only supported for --stage evaluate"
     assert args.stage == "evaluate" or not args.evaluate_from_start, "--evaluate-from-start is only supported for --stage evaluate"
     assert args.stage == "material" or not args.resume_parameters, "--resume-parameters is only supported for --stage material"
+    assert args.stage != "appearance" or args.appearance_model is None, "--appearance-model is only supported for material/evaluate"
+    assert args.stage == "evaluate" or args.render_appearance == "both", "--render-appearance is only supported for --stage evaluate"
     root, output = args.data.resolve(), args.output.resolve()
     manifest = load_manifest(root)
     train_count = len(manifest["train_frame_ids"])
@@ -45,7 +53,11 @@ def main() -> None:
     assert args.appearance_iterations > 0 and args.material_iterations > 0
     assert args.grid_size > 0 and args.substeps > 0
     assert args.stage == "evaluate" or not (args.skip_render or args.skip_video)
-    model = output / "appearance"
+    model = args.appearance_model.resolve() if args.appearance_model else output / "appearance"
+    if args.stage == "evaluate" and not args.skip_render and "body_shape_experiment" in manifest:
+        assert args.render_appearance == "gt_lighting", (
+            "Fixed-beta SMPL-X bodies require --render-appearance gt_lighting: "
+            "the existing learned body appearance is bound to the original SMPL-H topology")
     common = common_arguments(root, manifest, model)
     if args.stage == "appearance":
         final = model / "point_cloud" / f"timestep_{args.appearance_iterations:06d}" / "point_cloud.ply"
@@ -63,7 +75,7 @@ def main() -> None:
             command += ["--start_checkpoint", str(resume)]
     else:
         checkpoint = model / "point_cloud" / f"timestep_{args.appearance_iterations:06d}" / "point_cloud.ply"
-        assert checkpoint.is_file(), f"Run appearance first: {checkpoint}"
+        assert checkpoint.is_file(), f"Run appearance first or supply --appearance-model: {checkpoint}"
         stage_name = "evaluation" if args.stage == "evaluate" else "material"
         if args.stage == "evaluate":
             assert not (output / stage_name).exists(), f"Stage output already exists: {output / stage_name}"
@@ -101,12 +113,14 @@ def main() -> None:
                 material = max(checkpoints, key=lambda path: int(path.stem.removeprefix("last_param_")))
             assert material.is_file(), f"Material checkpoint does not exist: {material}"
             command += ["--run_eval", "--init_params_path", str(material)]
-            if args.skip_render:
+            if args.skip_render or args.render_appearance == "gt_lighting":
                 command.append("--skip_render")
             if args.skip_video:
                 command.append("--skip_video")
     gt_command: list[str] = []
     if args.stage == "evaluate" and not args.skip_render:
+        if args.render_appearance == "gt_lighting":
+            print("Rendering source materials/lighting only (--render-appearance gt_lighting).", flush=True)
         config = json.loads((root / "config.json").read_text())
         render_python = Path(config["render_python"])
         assert render_python.is_file(), render_python

@@ -4,7 +4,7 @@ import torch
 
 
 def estimate_velocity(vertices: torch.Tensor, frame_ids: list[int]) -> torch.Tensor:
-    """Estimate once from two consecutive 25 Hz training observations."""
+    """Estimate once from two consecutive 25 Hz cloth observations."""
     assert vertices.ndim == 3 and vertices.shape[-1] == 3
     assert len(frame_ids) == len(vertices) and len(frame_ids) >= 2
     assert frame_ids[1] == frame_ids[0] + 1

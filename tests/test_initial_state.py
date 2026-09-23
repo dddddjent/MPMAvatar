@@ -183,12 +183,17 @@ class SolverTests(unittest.TestCase):
         self.assertAlmostEqual(solver.time, 4 / 25)
         torch.testing.assert_close(torch.stack(continuous_predictions(trainer)), predicted, atol=1e-7, rtol=0)
 
+        trainer.scene.test_frame_index = [3, 4, 5]
+        trainer.motion_frame_ids = list(range(6))
+        trainer.body_motion = (vertices + .5).repeat(6, 1, 1)
+        trainer.body_motion_velocity = torch.zeros_like(trainer.body_motion[:-1])
+        trainer.prescribed_joint_positions = trainer.prescribed_human_positions = torch.empty(6, 0, 3, device=device)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = dict(status="complete", component="cape_mpmavatar_export", fps=25,
                             actor=127, sequence=1, sequence_key="a127_s1", gender="male",
-                            frame_ids=list(range(5)), train_frame_ids=[0, 1, 2],
-                            evaluation_frame_ids=[3, 4], camera_ids=["Cam001"],
+                            frame_ids=list(range(6)), train_frame_ids=[0, 1, 2],
+                            evaluation_frame_ids=[3, 4, 5], camera_ids=["Cam001"],
                             split_path="a127_s1/split_idx.npz",
                             prescribed_surface="a127_s1/prescribed_surface.npz",
                             tracking_directory="tracking/a127_s1_0_3",
@@ -207,8 +212,9 @@ class SolverTests(unittest.TestCase):
             uv_path = root / "uv.obj"
             uv_path.write_text("vt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n")
             surface = root / manifest["prescribed_surface"]
-            target = vertices.repeat(5, 1, 1).cpu().numpy()
-            target[3:] = predicted.cpu().numpy()
+            target = vertices.repeat(6, 1, 1).cpu().numpy()
+            # Held-out initialization is deliberately different from the frame-0 rollout.
+            target[3:, :, 0] += np.asarray([.062, .066, .070])[:, None]
             np.savez(surface, vertices=target)
             trainer.scene.dataset_dir = str(root)
             trainer.scene.train_frame_num = 2
@@ -216,41 +222,55 @@ class SolverTests(unittest.TestCase):
             trainer.args.prescribed_surface_path = str(surface)
             trainer.args.init_params_path = str(root / "material.npz")
             trainer.num_joint_v = 0
+            held_out = []
             for suffix, shift in (("first", 0.), ("changed_target", .1)):
-                target[3:, :, 0] += shift
+                # After the two initialization observations, free cloth must only affect scoring.
+                target[5, :, 0] += shift
                 np.savez(surface, vertices=target)
                 output = root / suffix
                 output.mkdir()
                 trainer.output_path = str(output)
                 result = torch.stack(simulate_future(trainer))
-                torch.testing.assert_close(result, predicted, atol=1e-7, rtol=0)
+                torch.testing.assert_close(result[0], torch.as_tensor(target[3], device=device), atol=0, rtol=0)
+                displacement = (result - vertices)[..., 0].mean(1)
+                torch.testing.assert_close(displacement, torch.tensor([.062, .066, .070], device=device), atol=5e-5, rtol=0)
+                held_out.append(result)
+                self.assertAlmostEqual(solver.time, 2 / 25)
                 report = json.loads((output / "geometry_metrics.json").read_text())
-                self.assertEqual(report["evaluation_frame_ids"], [3, 4])
+                self.assertEqual(report["evaluation_frame_ids"], [3, 4, 5])
                 self.assertEqual(report["evaluation_scope"], "held_out")
-                self.assertAlmostEqual(report["mean_v2v_m"], shift, places=6)
+                self.assertEqual(report["protocol"], "from_first_evaluation_frame")
+                self.assertEqual(report["initial_velocity_frame_ids"], [3, 4])
+                self.assertAlmostEqual(report["mean_v2v_m"], shift / 3, delta=5e-5)
                 with np.load(output / "predictions.npz") as saved:
-                    np.testing.assert_array_equal(saved["frame_ids"], [3, 4])
-                self.assertEqual(len(list((output / "uvmesh").glob("*.obj"))), 2)
+                    np.testing.assert_array_equal(saved["frame_ids"], [3, 4, 5])
+                self.assertEqual(len(list((output / "uvmesh").glob("*.obj"))), 3)
+            torch.testing.assert_close(held_out[0], held_out[1], atol=0, rtol=0)
+            held_out_report = report
 
-            trainer.scene.test_frame_index = list(range(5))
+            trainer.scene.test_frame_index = list(range(6))
             output = root / "full_sequence"
             output.mkdir()
             trainer.output_path = str(output)
             result = torch.stack(simulate_future(trainer))
             torch.testing.assert_close(result[0], vertices, atol=0, rtol=0)
-            torch.testing.assert_close(result[3:], predicted, atol=1e-7, rtol=0)
+            torch.testing.assert_close(result[3:5], predicted, atol=1e-7, rtol=0)
             displacement = (result - vertices)[..., 0].mean(1)
-            torch.testing.assert_close(displacement, torch.arange(5, device=device) * .004, atol=5e-5, rtol=0)
-            self.assertAlmostEqual(solver.time, 4 / 25)
+            torch.testing.assert_close(displacement, torch.arange(6, device=device) * .004, atol=5e-5, rtol=0)
+            self.assertAlmostEqual(solver.time, 5 / 25)
             report = json.loads((output / "geometry_metrics.json").read_text())
-            self.assertEqual(report["evaluation_scope"], "full_sequence")
-            self.assertEqual(report["evaluation_frame_ids"], list(range(5)))
+            self.assertEqual(report["evaluation_scope"], "held_out")
+            self.assertEqual(report["evaluation_frame_ids"], [3, 4, 5])
+            self.assertEqual(report["render_frame_ids"], list(range(6)))
             self.assertEqual(report["fitting_frame_ids"], [0, 1])
-            self.assertAlmostEqual(report["per_frame_v2v_m"][0], 0.)
+            self.assertEqual(report["per_frame_v2v_m"], held_out_report["per_frame_v2v_m"])
+            with np.load(output / "evaluation_predictions.npz") as saved:
+                np.testing.assert_array_equal(saved["frame_ids"], [3, 4, 5])
+                np.testing.assert_array_equal(saved["vertices"], held_out[0].cpu().numpy())
             with np.load(output / "predictions.npz") as saved:
-                np.testing.assert_array_equal(saved["frame_ids"], np.arange(5))
+                np.testing.assert_array_equal(saved["frame_ids"], np.arange(6))
                 np.testing.assert_allclose(saved["vertices"], result.cpu().numpy())
-            self.assertEqual(len(list((output / "uvmesh").glob("*.obj"))), 5)
+            self.assertEqual(len(list((output / "uvmesh").glob("*.obj"))), 6)
 
 
 if __name__ == "__main__":

@@ -126,6 +126,22 @@ class LauncherTests(unittest.TestCase):
                                       "--skip-render")
                 self.assertEqual(command[command.index("--init_params_path") + 1], str(checkpoint))
 
+    def test_shared_appearance_for_material_and_evaluation(self) -> None:
+        shared = self.root.parent / "baseline appearance"
+        checkpoint = shared / "point_cloud/timestep_030000/point_cloud.ply"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.touch()
+        material = self.launch("material", "--appearance-model", str(shared))
+        self.checkpoint("material/seed0/last_param_00003.npz")
+        evaluation = self.launch("evaluate", "--appearance-model", str(shared), "--skip-render")
+        for command in (material, evaluation):
+            self.assertEqual(command[command.index("--model_path") + 1], str(shared))
+            self.assertEqual(command[command.index("--dataset_dir") + 1], str(self.root))
+            self.assertEqual(command[command.index("--output_dir") + 1], str(self.output))
+        self.assertFalse((self.output / "appearance").exists())
+        with self.assertRaisesRegex(AssertionError, "only supported for material/evaluate"):
+            self.launch("appearance", "--appearance-model", str(shared))
+
     def test_checkpoint_option_errors_do_not_launch_evaluation(self) -> None:
         self.checkpoint("appearance/point_cloud/timestep_030000/point_cloud.ply")
         self.checkpoint("material/seed0/last_param_00199.npz")
@@ -234,6 +250,30 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaises(run.subprocess.CalledProcessError):
                 run.main()
         process.assert_called_once()
+
+    def test_fixed_beta_requires_explicit_mesh_rendering(self) -> None:
+        self.manifest["body_shape_experiment"] = {"prediction_body": "fitted_smplx"}
+        self.write_manifest()
+        self.checkpoint("appearance/point_cloud/timestep_030000/point_cloud.ply")
+        self.checkpoint("material/seed0/last_param_00003.npz")
+        with self.assertRaisesRegex(AssertionError, "--render-appearance gt_lighting"):
+            self.launch("evaluate")
+        command = self.launch("evaluate", "--skip-render")
+        self.assertIn("--skip_render", command)
+        (self.root / "config.json").write_text(json.dumps({"render_python": run.sys.executable}))
+        for relative in ("capture/manifest.json", "capture/cam_info.json", "preparation/sequence.npz"):
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        argv = ["run.py", "--data", str(self.root), "--output", str(self.output),
+                "--stage", "evaluate", "--render-appearance", "gt_lighting", "--skip-video"]
+        with patch("sys.argv", argv), patch("run.subprocess.run") as process:
+            run.main()
+        self.assertEqual(process.call_count, 2)
+        simulation, rendering = process.call_args_list
+        self.assertIn("--skip_render", simulation.args[0])
+        self.assertIn("MPMAvatar.render_gt_lighting", rendering.args[0])
+        self.assertIn("--skip-video", rendering.args[0])
 
 
 if __name__ == "__main__":

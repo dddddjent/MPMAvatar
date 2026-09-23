@@ -37,7 +37,7 @@ from warp_mpm.mpm_data_structure import (
 )
 from warp_mpm.mpm_solver import MPMWARP
 from warp_mpm.initial_state import estimate_velocity, particle_velocities
-from future_evaluation import simulate_future, load_driving_surface
+from future_evaluation import simulate_future, load_driving_surface, score_evaluation
 
 
 logger = get_logger(__name__, log_level="INFO")
@@ -639,11 +639,12 @@ class Trainer:
         
         return torch.stack([iR11, iR12, iR22], -1)
 
-    def compute_dir_vol(self, vertices, faces, thickness):
+    def compute_dir_vol(self, vertices: torch.Tensor, faces: torch.Tensor,
+                        thickness: float) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Compute Initial Direction Matrices
         d1 = vertices[faces[:,1]] - vertices[faces[:,0]]
         d2 = vertices[faces[:,2]] - vertices[faces[:,0]]
-        d3 = d1.cross(d2)
+        d3 = d1.cross(d2, dim=-1)
         d3 /= d3.norm(dim=1, keepdim=True)
         init_dir = torch.stack([d1, d2, d3], -1)
 
@@ -654,9 +655,9 @@ class Trainer:
         rest_dir = torch.stack([R11, R12, R22], -1)
 
         # Compute Particle Volumes
-        area = 0.5 * torch.norm(d1.cross(d2), dim=1)
+        area = 0.5 * torch.norm(d1.cross(d2, dim=-1), dim=1)
         element_vol = 0.25 * thickness * area
-        vertex_vol = torch.zeros(vertices.shape[0]).cuda().to(torch.float32)
+        vertex_vol = torch.zeros(vertices.shape[0], device=vertices.device, dtype=vertices.dtype)
         vertex_vol.index_add_(0, faces.reshape(-1), element_vol[:, None].repeat(1, 3).reshape(-1))
 
         return init_dir, rest_dir, element_vol, vertex_vol
@@ -866,6 +867,15 @@ class Trainer:
         skip_render: bool = False,
         skip_video: bool = False,
     ) -> None:
+        if self.args.prescribed_surface_path and not skip_render:
+            manifest = load_manifest(Path(self.scene.dataset_dir))
+            assert manifest.get("body_shape_experiment", {}).get("prediction_body") != "fitted_smplx", (
+                "Fitted appearance uses the original SMPL-H body topology and cannot render this "
+                "SMPL-X body experiment. Use run.py --render-appearance gt_lighting for exact "
+                "fitted-body videos."
+            )
+        if skip_sim and self.args.prescribed_surface_path:
+            score_evaluation(self, load_manifest(Path(self.scene.dataset_dir)))
         if not skip_sim and self.args.prescribed_surface_path:
             all_verts = simulate_future(self)
         elif not skip_sim:

@@ -55,8 +55,9 @@ tensorboard --logdir output/ClothTransformer/sim_00000_raw/appearance
 
 Material fitting uses only the chosen training prefix. Evaluation loads the highest
 saved `last_param` iteration in `material/seed0/`, freezes `D/E/H`, and
-simulates from the training start to the end of the held-out suffix. It does not
-reset cloth at the split; any gap after the fitting window is simulated too.
+scores a rollout initialized at the first held-out cloth mesh. Velocity is
+estimated from the first two held-out meshes; the fitted rest reference and `H`
+remain unchanged. Later free-cloth observations are used only for scoring.
 Keep fitting options identical when invoking evaluation. Each export's manifest
 defines the appearance-training prefix and future suffix.
 
@@ -68,11 +69,12 @@ paths start at the current directory. For example:
 python run.py --data ../data/MPMAvatar/ClothTransformer/sim_00000 --output output/ClothTransformer/sim_00000 --stage evaluate --checkpoint output/ClothTransformer/sim_00000/material/seed0/last_param_00119.npz
 ```
 
-Append `--evaluate-from-start` to save, score and render the full sequence from
-frame 0, including the training prefix. The default outputs only the held-out
-suffix; both modes use the same continuous simulation from frame 0. Full-sequence
-metric averages include training frames, and `geometry_metrics.json` records
-`evaluation_scope` as `full_sequence` or `held_out`.
+Append `--evaluate-from-start` to save/render a separate continuous rollout from
+frame 0. Both modes score only held-out frames using a rollout reset
+at the first evaluation frame. `geometry_metrics.json` records
+`evaluation_scope: held_out`, the initialization frames, and the separate render
+frame range. The initialized first evaluation frame is included in the average
+and has zero error. This protocol applies to original and tweaked-body exports.
 
 ```sh
 python run.py --data ../data/MPMAvatar/ClothTransformer/sim_00000 --output output/ClothTransformer/sim_00000 --stage evaluate --evaluate-from-start
@@ -81,12 +83,16 @@ python run.py --data ../data/MPMAvatar/ClothTransformer/sim_00000 --output outpu
 Future body and any attachment motion remain prescribed driving inputs.
 ClothTransformer and D-Garment retain their original visible body surfaces.
 Collision uses the exported raw body or fitted SMPL-X; neither adds pins. Free-cloth
-observations in the held-out frames are used only for scoring, not initialization
-or simulation updates. The export supplies the static simulation domain;
+observations initialize the evaluation rollout only once using its first two
+frames; subsequent observations never reset the simulation. The export supplies the static simulation domain;
 ClothTransformer and D-Garment exclude future cloth from its bounds.
-`evaluation/seed0/` contains `predictions.npz`, UV meshes,
-`geometry_metrics.json` (per-frame/mean V2V and XYZ MSE on free cloth, excluding
-prescribed attachments), and two render branches from the same predictions:
+`evaluation/seed0/` contains `evaluation_predictions.npz` for scoring,
+`predictions.npz` and UV meshes for the selected rendering rollout, and
+`geometry_metrics.json`/`.md` (per-frame/mean V2V and XYZ MSE on free cloth,
+excluding prescribed attachments). Metrics are computed even with `--skip-render`
+or the trainer's `--skip_sim` rendering mode. Standalone GT-lighting rendering
+requires the current evaluation report; regenerate evaluation for older outputs.
+The rendering branches are:
 
 - `gt_lighting/<camera>/`: predicted mesh with the capture's original materials,
   lights, cameras and color management; references are the original capture PNGs.
