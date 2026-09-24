@@ -11,7 +11,9 @@ from dataset_input import common_arguments, load_manifest
 
 # Template command (activate mpmavatar; run from MPMAvatar):
 # python run.py --data ../data/MPMAvatar/ClothTransformer/sim_00000 --output output/ClothTransformer/sim_00000 --stage appearance --appearance-iterations 30000 --material-iterations 200 --material-frames all --grid-size 200 --substeps 400
-# Run --stage material after appearance; run --stage evaluate after material fitting.
+# Run --stage material after appearance; optionally --stage body before --stage evaluate.
+# Body: --stage body --checkpoint /path/to/material.npz --body-iterations 100 --beta-lr 0.01 --beta-epsilon 0.01 --body-batch-size 8
+# Optimized-body evaluation: --stage evaluate --checkpoint /path/to/material.npz --body-checkpoint /path/to/best_body_shape.npz --render-appearance gt_lighting
 # Evaluation-only optional flags: --checkpoint /path/to/material.npz --evaluate-from-start --skip-render --skip-video.
 # Reuse appearance: --appearance-model /path/to/baseline/appearance (material/evaluate only).
 # Fixed-beta evaluation: --render-appearance gt_lighting.
@@ -21,16 +23,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--stage", choices=("appearance", "material", "evaluate"), required=True)
+    parser.add_argument("--stage", choices=("appearance", "material", "body", "evaluate"), required=True)
     parser.add_argument("--appearance-iterations", type=int, default=30000)
     parser.add_argument("--appearance-model", type=Path,
-                        help="Existing appearance directory to reuse for material/evaluate; default: <output>/appearance")
+                        help="Existing appearance directory to reuse for material/body/evaluate; default: <output>/appearance")
     parser.add_argument("--material-iterations", type=int, default=200)
     parser.add_argument("--material-frames", default="all", help="all (the manifest's complete training prefix), or a count from 2 to its length")
     parser.add_argument("--grid-size", type=int, default=200)
     parser.add_argument("--substeps", type=int, default=400)
     parser.add_argument("--checkpoint", type=Path,
-                        help="Evaluation material checkpoint; default: highest last_param iteration in <output>/material/seed0")
+                        help="Frozen material checkpoint for body/evaluate; required for body, otherwise defaults to latest local last_param")
+    parser.add_argument("--body-checkpoint", type=Path,
+                        help="Optimized body NPZ for evaluation; also supply its frozen material with --checkpoint")
+    parser.add_argument("--body-iterations", type=int, default=100, help="Total body fitting steps, including resumed steps")
+    parser.add_argument("--beta-lr", type=float, default=0.01)
+    parser.add_argument("--beta-epsilon", type=float, default=0.01, help="Central finite-difference offset in beta units")
+    parser.add_argument("--body-batch-size", type=int, default=8, help="Frames per SMPL-X regeneration batch")
     parser.add_argument("--evaluate-from-start", action="store_true",
                         help="Render a rollout from frame 0; error always uses a separate rollout from the first evaluation frame")
     parser.add_argument("--skip-render", action="store_true")
@@ -40,13 +48,23 @@ def main() -> None:
     parser.add_argument("--resume-parameters", action="store_true",
                         help="One-time material resume from old NPZ files, resetting Adam and the LR schedule")
     args = parser.parse_args()
-    assert args.stage == "evaluate" or args.checkpoint is None, "--checkpoint is only supported for --stage evaluate"
+    assert args.stage in ("body", "evaluate") or args.checkpoint is None, "--checkpoint is only supported for --stage evaluate or body"
+    assert args.stage == "evaluate" or args.body_checkpoint is None, "--body-checkpoint is only supported for --stage evaluate"
+    if args.stage == "body" or args.body_checkpoint:
+        assert args.checkpoint, "Choose the frozen material explicitly with --checkpoint PATH"
     assert args.stage == "evaluate" or not args.evaluate_from_start, "--evaluate-from-start is only supported for --stage evaluate"
     assert args.stage == "material" or not args.resume_parameters, "--resume-parameters is only supported for --stage material"
-    assert args.stage != "appearance" or args.appearance_model is None, "--appearance-model is only supported for material/evaluate"
+    assert args.stage != "appearance" or args.appearance_model is None, "--appearance-model is only supported for material/evaluate or body"
     assert args.stage == "evaluate" or args.render_appearance == "both", "--render-appearance is only supported for --stage evaluate"
     root, output = args.data.resolve(), args.output.resolve()
     manifest = load_manifest(root)
+    if args.stage == "body" or args.body_checkpoint:
+        assert "body_shape_experiment" in manifest, "Choose a tweaked-beta export with --data"
+        assert manifest.get("body_model", "smplx") == "smplx", "Body optimization requires a parametric SMPL-X collider"
+        assert (root / manifest["body_shape_experiment"]["body_motion"]).is_file()
+        assert args.body_iterations > 0 and args.beta_lr > 0 and args.beta_epsilon > 0 and args.body_batch_size > 0
+    if args.body_checkpoint:
+        assert args.body_checkpoint.is_file(), f"Body checkpoint does not exist: {args.body_checkpoint}"
     train_count = len(manifest["train_frame_ids"])
     material_count = train_count if args.material_frames == "all" else int(args.material_frames)
     assert 2 <= material_count <= train_count, "Choose --material-frames within the exported training prefix"
@@ -76,7 +94,7 @@ def main() -> None:
     else:
         checkpoint = model / "point_cloud" / f"timestep_{args.appearance_iterations:06d}" / "point_cloud.ply"
         assert checkpoint.is_file(), f"Run appearance first or supply --appearance-model: {checkpoint}"
-        stage_name = "evaluation" if args.stage == "evaluate" else "material"
+        stage_name = {"evaluate": "evaluation", "body": "body", "material": "material"}[args.stage]
         if args.stage == "evaluate":
             assert not (output / stage_name).exists(), f"Stage output already exists: {output / stage_name}"
         test_start, test_count = 0, 2
@@ -102,7 +120,7 @@ def main() -> None:
         if args.resume_parameters:
             assert (output / stage_name).is_dir(), "--resume-parameters requires an existing material run"
             command.append("--resume_parameters")
-        if args.stage == "evaluate":
+        if args.stage in ("body", "evaluate"):
             if args.checkpoint:
                 material = args.checkpoint.resolve()
             else:
@@ -112,7 +130,16 @@ def main() -> None:
                 assert checkpoints, f"Run material fitting first: no last_param checkpoints in {directory}; or pass --checkpoint PATH"
                 material = max(checkpoints, key=lambda path: int(path.stem.removeprefix("last_param_")))
             assert material.is_file(), f"Material checkpoint does not exist: {material}"
-            command += ["--run_eval", "--init_params_path", str(material)]
+            command += ["--init_params_path", str(material)]
+        if args.stage == "body":
+            command += ["--body_shape", "--body_iterations", str(args.body_iterations),
+                        "--beta_lr", str(args.beta_lr), "--beta_epsilon", str(args.beta_epsilon),
+                        "--body_batch_size", str(args.body_batch_size)]
+        if args.stage == "evaluate":
+            command.append("--run_eval")
+            if args.body_checkpoint:
+                command += ["--body_checkpoint", str(args.body_checkpoint.resolve()),
+                            "--body_batch_size", str(args.body_batch_size)]
             if args.skip_render or args.render_appearance == "gt_lighting":
                 command.append("--skip_render")
             if args.skip_video:

@@ -183,6 +183,8 @@ def score_evaluation(trainer: "Trainer", manifest: dict[str, Any]) -> list[torch
         report["prediction_body"] = "predicted_body.npz: exact simulation collider for render_frame_ids"
         report["body_shape_experiment"] = experiment
         report["predictions_archive_body"] = "Original-topology placeholder; render predicted_body.npz instead"
+    if hasattr(trainer, "body_shape_result"):
+        report["optimized_body"] = trainer.body_shape_result
     (output / "geometry_metrics.json").write_text(json.dumps(report, indent=2) + "\n")
     (output / "geometry_metrics.md").write_text(
         f"# Held-out cloth evaluation\n\n"

@@ -29,6 +29,7 @@ from evaluation_video import encode_comparison
 from collider_motion import load_raw_collider
 from dataset_input import load_manifest
 from material_progress import export_progress, restore_training_state, save_training_state
+from fit_curves import render_body, render_material
 
 import warp as wp
 from warp_mpm.mpm_data_structure import (
@@ -112,6 +113,9 @@ class Trainer:
             self.collider_faces = torch.from_numpy(self.lbs_deformer.smplx_model.faces.astype(int))
         if args.prescribed_surface_path:
             self.load_prescribed_surface(args.prescribed_surface_path)
+        if args.body_checkpoint:
+            from body_shape import load_body_shape
+            load_body_shape(self, Path(args.body_checkpoint), Path(self.scene.dataset_dir), args.body_batch_size)
 
         bg_color = [1, 1, 1] if self.scene.white_bkgd else [0, 0, 0]
         self.bg = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -454,11 +458,14 @@ class Trainer:
         if self.run_eval:
             assert self.scene.test_frame_index[0] == 0 or self.scene.test_frame_index[0] > self.scene.train_frame_index[-1]
             assert self.args.init_params_path, "Future evaluation requires fitted material parameters"
-            with np.load(self.args.init_params_path, allow_pickle=False) as checkpoint:
-                assert np.array_equal(checkpoint["fitting_frame_ids"], self.scene.train_frame_index)
-                assert str(checkpoint["dataset_dir"]) == os.path.abspath(self.scene.dataset_dir)
-                assert np.allclose(checkpoint["initial_cloth_velocity_world_m_s"],
-                                   self.initial_cloth_velocity.cpu().numpy(), atol=1e-6, rtol=0)
+            # A body checkpoint binds the chosen D/E/H independently of the dataset
+            # used to fit material. Its own source/window checks run when loaded.
+            if not self.args.body_checkpoint:
+                with np.load(self.args.init_params_path, allow_pickle=False) as checkpoint:
+                    assert np.array_equal(checkpoint["fitting_frame_ids"], self.scene.train_frame_index)
+                    assert str(checkpoint["dataset_dir"]) == os.path.abspath(self.scene.dataset_dir)
+                    assert np.allclose(checkpoint["initial_cloth_velocity_world_m_s"],
+                                       self.initial_cloth_velocity.cpu().numpy(), atol=1e-6, rtol=0)
 
     def setup_simulation(self, grid_size: int = 100) -> None:
 
@@ -858,6 +865,7 @@ class Trainer:
                             self.optimizer, self.scheduler, self.best_params, self.last_params,
                             self.resume_context, self.optimizer_reset_step)
         export_progress(Path(self.output_path))
+        render_material(Path(self.output_path) / "history.csv", Path(self.output_path) / "fit_curves.png")
         return
     
     @torch.no_grad()
@@ -1033,6 +1041,12 @@ def parse_args():
     parser.add_argument("--smplx_num_betas", type=int, default=300)
     parser.add_argument("--prescribed_surface_path", type=str, default="")
     parser.add_argument("--raw_collider_path", type=str, default="")
+    parser.add_argument("--body_shape", action="store_true")
+    parser.add_argument("--body_checkpoint", type=str, default="")
+    parser.add_argument("--body_iterations", type=int, default=100)
+    parser.add_argument("--beta_lr", type=float, default=0.01)
+    parser.add_argument("--beta_epsilon", type=float, default=0.01)
+    parser.add_argument("--body_batch_size", type=int, default=8)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--resume_parameters", action="store_true")
     parser.add_argument("--skip_sim", action="store_true", default=False)
@@ -1054,6 +1068,14 @@ def parse_args():
     model_args.smplx_num_betas = args.smplx_num_betas
     model_args.prescribed_surface_path = args.prescribed_surface_path
     model_args.raw_collider_path = args.raw_collider_path
+    model_args.body_shape = args.body_shape
+    model_args.body_checkpoint = args.body_checkpoint
+    model_args.body_iterations = args.body_iterations
+    model_args.beta_lr = args.beta_lr
+    model_args.beta_epsilon = args.beta_epsilon
+    model_args.body_batch_size = args.body_batch_size
+    assert not args.body_shape or (not args.run_eval and not args.resume and not args.body_checkpoint)
+    assert not args.body_checkpoint or args.run_eval
     model_args.resume = args.resume
     model_args.resume_parameters = args.resume_parameters
     return model_args, op.extract(args), pp.extract(args), args.run_eval, args.skip_sim, args.skip_render, args.skip_video
@@ -1062,7 +1084,25 @@ if __name__ == "__main__":
     args, opt, pipe, run_eval, skip_sim, skip_render, skip_video = parse_args()
     trainer = Trainer(args, opt, pipe, run_eval)
 
-    if run_eval:
+    if args.body_shape:
+        from body_shape import fit_body_shape
+        fit_body_shape(trainer, Path(args.dataset_dir), Path(args.init_params_path),
+                       iterations=args.body_iterations, learning_rate=args.beta_lr,
+                       finite_difference=args.beta_epsilon, batch_size=args.body_batch_size,
+                       resume=(Path(trainer.output_path) / "body_shape_state.pt").is_file())
+    elif run_eval:
+        evaluation = Path(trainer.output_path)
+        material = Path(args.init_params_path)
+        with np.load(material, allow_pickle=False) as selected:
+            material_step = int(selected["step"])
+        render_material(material.parent / "history.csv", evaluation / "material_fit_curves.png", material_step)
+        if args.body_checkpoint:
+            body = Path(args.body_checkpoint)
+            with np.load(body, allow_pickle=False) as selected:
+                body_step = int(selected["step"])
+                beta_index = int(selected["beta_index"])
+            render_body(body.parent / "beta_history.csv", evaluation / "body_fit_curves.png",
+                        beta_index, body_step)
         trainer.eval(skip_sim, skip_render, skip_video)
     else:
         trainer.train()

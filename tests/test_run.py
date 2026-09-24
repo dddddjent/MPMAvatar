@@ -275,6 +275,43 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("MPMAvatar.render_gt_lighting", rendering.args[0])
         self.assertIn("--skip-video", rendering.args[0])
 
+    def test_body_stage_selects_source_and_material_independently(self) -> None:
+        self.manifest.update(body_model="smplx", body_shape_experiment={
+            "prediction_body": "fitted_smplx", "body_motion": "preparation/collider.npz",
+            "perturbation": {"beta_index": 3},
+        })
+        self.write_manifest()
+        collider = self.root / "preparation/collider.npz"
+        collider.parent.mkdir()
+        collider.touch()
+        shared = self.checkpoint("shared appearance/point_cloud/timestep_030000/point_cloud.ply").parents[2]
+        material = self.checkpoint("different body/material/last_param_00007.npz")
+        command = self.launch("body", "--appearance-model", str(shared), "--checkpoint", str(material),
+                              "--body-iterations", "4", "--beta-lr", "0.02", "--beta-epsilon", "0.03",
+                              "--body-batch-size", "2", "--material-frames", "3")
+        self.assertIn("--body_shape", command)
+        self.assertNotIn("--run_eval", command)
+        for flag, value in (("--save_name", "body"), ("--init_params_path", str(material)),
+                            ("--dataset_dir", str(self.root)), ("--body_iterations", "4"),
+                            ("--beta_lr", "0.02"), ("--beta_epsilon", "0.03"),
+                            ("--body_batch_size", "2")):
+            self.assertEqual(command[command.index(flag) + 1], value)
+        body = self.checkpoint("body/seed0/best_body_shape.npz")
+        command = self.launch("evaluate", "--appearance-model", str(shared), "--checkpoint", str(material),
+                              "--body-checkpoint", str(body), "--material-frames", "3", "--skip-render")
+        self.assertEqual(command[command.index("--body_checkpoint") + 1], str(body))
+        self.assertEqual(command[command.index("--init_params_path") + 1], str(material))
+        self.assertIn("--run_eval", command)
+
+    def test_body_requires_explicit_material_and_tweaked_source(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "Choose the frozen material"):
+            self.launch("body")
+        material = self.checkpoint("material/seed0/last_param_00001.npz")
+        with self.assertRaisesRegex(AssertionError, "Choose a tweaked-beta export"):
+            self.launch("body", "--checkpoint", str(material))
+        with self.assertRaisesRegex(AssertionError, "only supported for --stage evaluate"):
+            self.launch("material", "--body-checkpoint", "body.npz")
+
 
 if __name__ == "__main__":
     unittest.main()
