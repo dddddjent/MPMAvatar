@@ -1,7 +1,7 @@
 accelerate==0.25.0
-decord==0.6.0
 einops==0.7.0
 fire==0.5.0
+iopath
 human_body_prior==0.8.5.0
 imageio==2.34.0
 ipython
@@ -33,5 +33,5 @@ tensorboard
 tqdm==4.65.0
 trimesh==4.0.8
 wandb[media]
-warp_lang==0.10.1
+warp_lang==1.17.0
 xatlas==0.0.9

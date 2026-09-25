@@ -176,33 +176,15 @@ KAIST
 
 ## Environment Setup  
 
-1. Clone this repository
+From the workspace root, create the CUDA 13 environment. Native extensions
+include A100 (8.0), A40 (8.6), H200 (9.0), and RTX 5080 (12.0) kernels.
+Conda uses its configured environment and package directories. `ffmpeg` is
+included; the separate `synthetic_avatar` environment provides Blender rendering.
 
-<pre><code> $ git clone https://github.com/KAISTChangmin/MPMAvatar.git
- $ cd MPMAvatar </pre></code>
-
-2. Install required apt packages
-
-<pre><code> $ sudo apt-get update
- $ sudo apt-get install ffmpeg gdebi libgl1-mesa-glx libopencv-dev libsm6 libxrender1 libfontconfig1 libglvnd0 libegl1 libgles2 </pre></code>
- 
-3. Install [Blender](https://www.blender.org/) for Ambient Occlusion map baking
-
-<pre><code> $ curl -OL https://download.blender.org/release/Blender4.4/blender-4.4.1-linux-x64.tar.xz
- $ tar -xJf ./blender-4.4.1-linux-x64.tar.xz -C ./
- $ rm -f ./blender-4.4.1-linux-x64.tar.xz
- $ mv ./blender-4.4.1-linux-x64 /usr/local/blender
- $ export PATH=/usr/local/blender:$PATH </pre></code>
-
-3. Create conda environment and install required pip packages
-
-<pre><code> $ conda create -n mpmavatar python=3.10
- $ conda activate mpmavatar
- $ pip install torch==2.0.0+cu118 torchvision==0.15.1+cu118 -f https://download.pytorch.org/whl/torch_stable.html
- $ pip install -r ./requirements.txt
- $ pip install git+https://gitlab.inria.fr/bkerbl/simple-knn.git
- $ pip install git+https://github.com/slothfulxtx/diff-gaussian-rasterization.git
- $ FORCE_CUDA=1 pip install git+https://github.com/facebookresearch/pytorch3d.git </pre></code>
+```sh
+bash MPMAvatar/setup.sh
+conda activate mpmavatar
+```
 
 &nbsp;
 
