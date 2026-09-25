@@ -1,5 +1,14 @@
 # MPMAvatar
 
+## Native 4D-DRESS preparation
+
+`preprocess/prepare_4ddress.py` builds templates, garment splits and camera labels
+from raw scans, with source files linked in place. `preprocess/track_4ddress.py`
+runs native tracking, UV transfer, AO and skin-weight inpainting. See the
+[workspace commands and subject-190 validation](../README.md#4d-dress--mpmavatar).
+`preprocess/compare_4ddress_templates.py` compares geometry, UVs, connectivity and
+garment partitions against author assets independently of vertex numbering.
+
 ## Prepared dataset input
 
 Activate the existing `mpmavatar` environment. `run.py` accepts completed
