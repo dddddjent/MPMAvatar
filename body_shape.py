@@ -161,6 +161,7 @@ def _save_progress(trainer: Trainer, body: SingleBetaBody, state: dict[str, Any]
     torch.save(state, temporary)
     temporary.replace(root / "body_shape_state.pt")
     summary = {**context, "completed_iterations": state["next_step"],
+               "planned_iterations": state["planned_iterations"], "stop_after_iterations": state["stop_after_iterations"],
                "initial_beta": body.initial_beta, "best": state["best"], "last": state["last"],
                "objective": "Mean of cloth vertex coordinate MSE over noninitial training frames",
                "fixed": "Material D/E/H, all other betas, poses, translations and prescribed cloth attachments"}
@@ -187,9 +188,11 @@ def _save_progress(trainer: Trainer, body: SingleBetaBody, state: dict[str, Any]
 @torch.no_grad()
 def fit_body_shape(trainer: Trainer, source_root: Path, material_path: Path, *, iterations: int,
                    learning_rate: float, finite_difference: float, batch_size: int = 8,
-                   resume: bool = False) -> None:
+                   resume: bool = False, stop_after: int = 0) -> None:
     """Use central finite differences and AdamW on the one recorded beta."""
     assert iterations > 0 and learning_rate > 0 and finite_difference > 0
+    assert 0 <= stop_after <= iterations, "Body stop-after must be within the planned iteration target"
+    end_step = stop_after or iterations
     assert trainer.accelerator.num_processes == 1, "Body fitting requires one process"
     assert source_root.resolve() == Path(trainer.scene.dataset_dir).resolve()
     assert material_path.is_file(), material_path
@@ -215,16 +218,18 @@ def fit_body_shape(trainer: Trainer, source_root: Path, material_path: Path, *, 
         assert state["context"] == context, "Body resume settings or input selection changed"
         beta.fill_(state["last"]["beta"])
         optimizer.load_state_dict(state["optimizer"])
+        state["planned_iterations"], state["stop_after_iterations"] = iterations, stop_after
         _save_progress(trainer, body, state, optimizer)
     else:
         assert not state_path.exists(), "Use resume for the existing body fit"
         body.apply(trainer, float(beta))
         initial = {"step": 0, "beta": float(beta), "loss": geometry_loss(trainer)}
         state = {"context": context, "next_step": 0, "best": initial.copy(), "last": initial.copy(),
+                 "planned_iterations": iterations, "stop_after_iterations": stop_after,
                  "history": [{**initial, "beta_before": float(beta), "loss_minus": "", "loss_plus": "", "gradient": ""}]}
         _save_progress(trainer, body, state, optimizer)
         print(f"Body beta[{body.beta_index}] initial={float(beta):.9g} loss={initial['loss']:.9g}", flush=True)
-    for step in range(state["next_step"], iterations):
+    for step in range(state["next_step"], end_step):
         before = float(beta)
         minus, plus = float(np.float32(before - finite_difference)), float(np.float32(before + finite_difference))
         assert minus < before < plus, "Finite-difference epsilon is too small at this beta"
@@ -250,6 +255,7 @@ def fit_body_shape(trainer: Trainer, source_root: Path, material_path: Path, *, 
               f"loss={evaluated['loss']:.9g} gradient={gradient:.9g} "
               f"best_beta={state['best']['beta']:.9g}", flush=True)
     body.apply(trainer, state["best"]["beta"])
+    print(f"Body completed {state['next_step']}/{iterations} planned updates (stop-after {end_step})", flush=True)
     print(f"Body fit: best beta[{body.beta_index}]={state['best']['beta']:.9g}; {root / 'beta_summary.txt'}", flush=True)
 
 

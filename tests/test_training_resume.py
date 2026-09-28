@@ -1,6 +1,7 @@
 """Exercise the real stage checkpoint code without loading an experiment."""
 
 from argparse import ArgumentParser
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -21,42 +22,77 @@ from train_material_params import Trainer
 
 
 class TrainingResumeTests(unittest.TestCase):
-    def test_material_training_writes_progress_with_accelerate(self) -> None:
+    def test_material_stop_cap_resumes_original_optimizer_schedule_and_progress(self) -> None:
         accelerator = Accelerator(cpu=True)
-        with tempfile.TemporaryDirectory() as directory:
+
+        def make_trainer(directory: Path, cap: int) -> Trainer:
+            directory.mkdir(parents=True, exist_ok=True)
             trainer = Trainer.__new__(Trainer)
-            trainer.output_path = directory
-            trainer.step = 2
+            trainer.output_path = str(directory)
+            trainer.step = 0
             trainer.iterations = 3
+            trainer.args = SimpleNamespace(stop_after=cap)
             trainer.accelerator = accelerator
             trainer.scene = SimpleNamespace(train_frame_index=[0, 1], dataset_dir="/dataset")
             trainer.initial_cloth_velocity = torch.ones(3, 3)
             trainer.torch_param = {key: torch.tensor(value) for key, value in
                                    zip(("D", "E", "H"), (0.6, 7.3, 0.9))}
             optimizer = torch.optim.Adam(list(trainer.torch_param.values()), lr=0.01)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50.)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=3.)
             trainer.optimizer, trainer.scheduler = accelerator.prepare(optimizer, scheduler)
+            trainer.best_params = trainer.last_params = {"loss": 1e9}
+            trainer.resume_context = {"dataset_dir": "/dataset", "fitting_frame_ids": [0, 1], "iterations": 3}
+            trainer.optimizer_reset_step = None
+            return trainer
+
+        def update(trainer: Trainer) -> None:
+            evaluated = {f"evaluated_{key}": value.item() * (100. if key == "E" else 1.)
+                         for key, value in trainer.torch_param.items()}
+            loss = sum(float(value.square()) for value in trainer.torch_param.values())
+            trainer.optimizer.zero_grad()
             for value in trainer.torch_param.values():
                 value.grad = value.square()
             trainer.optimizer.step()
             trainer.scheduler.step()
-            trainer.best_params = trainer.last_params = {
-                "step": 2, "loss": 0.01, "D": 0.6, "E": 730., "H": 0.9,
-                "evaluated_D": 0.61, "evaluated_E": 740., "evaluated_H": 0.91,
-            }
-            trainer.resume_context = {"dataset_dir": "/dataset", "fitting_frame_ids": [0, 1]}
-            trainer.optimizer_reset_step = None
-            with patch.object(trainer, "train_one_step") as simulation:
+            trainer.last_params = {"step": trainer.step, "loss": loss, **evaluated,
+                                   **{key: value.item() * (100. if key == "E" else 1.)
+                                      for key, value in trainer.torch_param.items()}}
+            if loss < trainer.best_params["loss"]:
+                trainer.best_params = trainer.last_params.copy()
+
+        def train(trainer: Trainer) -> None:
+            with patch.object(trainer, "train_one_step", side_effect=lambda: update(trainer)), patch(
+                "train_material_params.render_material"
+            ):
                 trainer.train()
-            simulation.assert_called_once()
-            state = restore_training_state(Path(directory), trainer.torch_param, trainer.optimizer,
-                                           trainer.scheduler, trainer.resume_context, False)
-            self.assertEqual(state["next_step"], 3)
-            self.assertEqual(state["last"]["evaluated_E"], 740.)
-            self.assertTrue((Path(directory) / "history.csv").is_file())
-            self.assertTrue((Path(directory) / "summary.json").is_file())
-            with np.load(Path(directory) / "last_param_00002.npz") as saved:
-                self.assertEqual(saved["evaluated_E"].item(), 740.)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            complete = make_trainer(root / "complete", 0)
+            train(complete)
+            partial = make_trainer(root / "resumed", 1)
+            train(partial)
+            summary = json.loads((root / "resumed/summary.json").read_text())
+            self.assertEqual((summary["completed_iterations"], summary["planned_iterations"], summary["stop_after_iterations"]), (1, 3, 1))
+            resumed = make_trainer(root / "resumed", 3)
+            state = restore_training_state(root / "resumed", resumed.torch_param, resumed.optimizer,
+                                           resumed.scheduler, resumed.resume_context, False)
+            resumed.step = state["next_step"]
+            resumed.best_params, resumed.last_params = state["best"], state["last"]
+            train(resumed)
+            summary = json.loads((root / "resumed/summary.json").read_text())
+            self.assertEqual((summary["completed_iterations"], summary["planned_iterations"], summary["stop_after_iterations"]), (3, 3, 3))
+            self.assertEqual(resumed.step, 3)
+            self.assertEqual(resumed.resume_context, complete.resume_context)
+            self.assertEqual(resumed.scheduler.state_dict(), complete.scheduler.state_dict())
+            self.assertEqual(resumed.best_params, complete.best_params)
+            self.assertEqual(resumed.last_params, complete.last_params)
+            self.assertEqual((root / "resumed/history.csv").read_text(), (root / "complete/history.csv").read_text())
+            for key in complete.torch_param:
+                torch.testing.assert_close(resumed.torch_param[key], complete.torch_param[key], rtol=0, atol=0)
+                for field in ("step", "exp_avg", "exp_avg_sq"):
+                    torch.testing.assert_close(resumed.optimizer.state[resumed.torch_param[key]][field],
+                                               complete.optimizer.state[complete.torch_param[key]][field], rtol=0, atol=0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for Gaussian optimizer groups")
     def test_appearance_optimizer_and_auxiliary_parameters(self) -> None:

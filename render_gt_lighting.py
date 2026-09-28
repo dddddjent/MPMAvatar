@@ -14,7 +14,7 @@ from cape_avatar import render_utils as render
 from MPMAvatar.evaluation_video import encode_comparison
 
 # Template command (dataset's render_python environment, from clothes-reconstruction):
-# python -m MPMAvatar.render_gt_lighting --data /absolute/dataset --evaluation /absolute/output/evaluation/seed0 --skip-video
+# python -m MPMAvatar.render_gt_lighting --data /absolute/dataset --evaluation /absolute/output/evaluation/seed0 --camera-id Cam001 --skip-video
 # Omit --skip-video to encode prediction/reference/comparison videos.
 
 
@@ -77,7 +77,8 @@ def capture_cameras(scene: Any, settings: dict[str, Any], info: dict[str, Any],
     return cameras
 
 
-def render_predictions(root: Path, evaluation: Path, skip_video: bool) -> None:
+def render_predictions(root: Path, evaluation: Path, skip_video: bool,
+                       requested_cameras: list[str]) -> None:
     """Render simulated cloth and the selected prediction body with source lighting."""
     manifest = json.loads((root / "manifest.json").read_text())
     metric_path = evaluation / "geometry_metrics.json"
@@ -93,6 +94,9 @@ def render_predictions(root: Path, evaluation: Path, skip_video: bool) -> None:
     settings = capture["settings"]
     info = json.loads((root / "capture/cam_info.json").read_text())
     assert list(info) == manifest["camera_ids"] == capture["camera_ids"]
+    camera_ids = requested_cameras or manifest["camera_ids"]
+    assert len(camera_ids) == len(set(camera_ids)) and all(name in info for name in camera_ids)
+    info = {name: info[name] for name in camera_ids}
     with np.load(evaluation / "predictions.npz", allow_pickle=False) as data:
         frames, vertices = data["frame_ids"].tolist(), data["vertices"]
     assert frames in (manifest["evaluation_frame_ids"], manifest["frame_ids"])
@@ -175,9 +179,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--evaluation", type=Path, required=True)
+    parser.add_argument("--camera-id", action="append", default=[], help="Capture camera to render; repeat for multiple cameras")
     parser.add_argument("--skip-video", action="store_true")
     args = parser.parse_args()
-    render_predictions(args.data.resolve(), args.evaluation.resolve(), args.skip_video)
+    render_predictions(args.data.resolve(), args.evaluation.resolve(), args.skip_video,
+                       args.camera_id)
 
 
 if __name__ == "__main__":

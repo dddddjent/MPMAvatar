@@ -26,7 +26,8 @@ def read_parameters(path: Path) -> dict[str, Any]:
                 if key in data}
 
 
-def export_progress(directory: Path, last_step: int | None = None) -> None:
+def export_progress(directory: Path, last_step: int | None = None, *, planned_iterations: int = 0,
+                    stop_after_iterations: int = 0) -> None:
     paths = parameter_files(directory)
     if last_step is not None:
         paths = [path for path in paths if int(path.stem.removeprefix("last_param_")) <= last_step]
@@ -43,6 +44,7 @@ def export_progress(directory: Path, last_step: int | None = None) -> None:
     best = last.with_name(last.name.replace("last_param_", "best_param_"))
     assert best.is_file(), best
     summary = {
+        "completed_iterations": read_parameters(last)["step"] + 1,
         "last": read_parameters(last), "best": read_parameters(best),
         "last_checkpoint": last.name, "best_checkpoint": best.name,
         "loss_note": "Loss is measured before the update; D/E/H are after it. "
@@ -50,6 +52,9 @@ def export_progress(directory: Path, last_step: int | None = None) -> None:
                      "Best retains the original trainer's pre-update loss/post-update parameter convention.",
         "E_note": "E uses the exported/terminal units (100 times the internal optimizer variable).",
     }
+    if planned_iterations:
+        assert 0 <= stop_after_iterations <= planned_iterations
+        summary.update(planned_iterations=planned_iterations, stop_after_iterations=stop_after_iterations)
     temporary = directory / "summary.json.tmp"
     temporary.write_text(json.dumps(summary, indent=2) + "\n")
     temporary.replace(directory / "summary.json")

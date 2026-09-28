@@ -223,6 +223,14 @@ class Trainer:
             "nu": self.init_nu, "gamma": self.init_gamma, "kappa": self.init_kappa,
             "mesh_friction_coeff": self.mesh_friction_coeff, "friction_angle": self.friction_angle,
         }
+        if args.checkpoint_material:
+            assert not run_eval and args.dataset_type == "4ddress"
+            assert not args.prescribed_surface_path and not args.raw_collider_path
+            assert not args.body_shape and not args.joint_shape and accelerator.num_processes == 1
+            if not args.resume:
+                save_training_state(Path(self.output_path), 0, self.torch_param,
+                                    self.optimizer, self.scheduler, self.best_params, self.last_params,
+                                    self.resume_context, self.optimizer_reset_step)
         if args.resume:
             assert not run_eval and not args.init_params_path, "Resume is only for material training"
             assert accelerator.num_processes == 1, "Material resume currently requires one process"
@@ -236,7 +244,9 @@ class Trainer:
             save_training_state(Path(self.output_path), self.step, self.torch_param,
                                 self.optimizer, self.scheduler, self.best_params, self.last_params,
                                 self.resume_context, self.optimizer_reset_step)
-            export_progress(Path(self.output_path), self.step - 1)
+            if not args.checkpoint_material or self.step > 0:
+                export_progress(Path(self.output_path), self.step - 1,
+                                planned_iterations=self.iterations, stop_after_iterations=args.stop_after)
 
         self.log_iters = opt.log_iters
         self.video_iters = opt.video_iters
@@ -836,15 +846,18 @@ class Trainer:
         self.accelerator.wait_for_everyone()
 
     def train(self) -> None:
-        if self.step >= self.iterations:
+        assert 0 <= self.args.stop_after <= self.iterations, "Material stop-after must be within the planned iteration target"
+        end_step = self.args.stop_after or self.iterations
+        if self.step >= end_step:
             print(f"Material already completed {self.step} iterations: {self.output_path}", flush=True)
             return
-        for index in tqdm(range(self.step, self.iterations), desc="Training progress"):
+        for index in tqdm(range(self.step, end_step), desc="Training progress"):
             self.train_one_step()
             if self.accelerator.is_main_process:
                 self.save()
             self.accelerator.wait_for_everyone()
             self.step += 1
+        print(f"Material completed {self.step}/{self.iterations} planned updates (stop-after {end_step})", flush=True)
 
     def save(self) -> None:
         initial_state = {
@@ -864,7 +877,8 @@ class Trainer:
         save_training_state(Path(self.output_path), self.step + 1, self.torch_param,
                             self.optimizer, self.scheduler, self.best_params, self.last_params,
                             self.resume_context, self.optimizer_reset_step)
-        export_progress(Path(self.output_path))
+        export_progress(Path(self.output_path), planned_iterations=self.iterations,
+                        stop_after_iterations=self.args.stop_after)
         render_material(Path(self.output_path) / "history.csv", Path(self.output_path) / "fit_curves.png")
         return
     
@@ -875,6 +889,13 @@ class Trainer:
         skip_render: bool = False,
         skip_video: bool = False,
     ) -> None:
+        checkpoint_eval = self.args.checkpoint_eval
+        if checkpoint_eval:
+            from native_evaluation_checkpoint import restore_evaluation_state, save_evaluation_state
+            assert self.args.dataset_type == "4ddress"
+            assert not self.args.prescribed_surface_path and not self.args.raw_collider_path
+            assert not self.args.body_shape and not self.args.joint_shape and not self.args.body_checkpoint
+            assert self.accelerator.num_processes == 1 and self.n_traditional == 0
         if self.args.prescribed_surface_path and not skip_render:
             manifest = load_manifest(Path(self.scene.dataset_dir))
             assert manifest.get("body_shape_experiment", {}).get("prediction_body") != "fitted_smplx", (
@@ -938,12 +959,52 @@ class Trainer:
             all_verts = []
             mesh_dir = os.path.join(self.output_path, "uvmesh")
             os.makedirs(mesh_dir, exist_ok=True)
-            with open(os.path.join(mesh_dir, f"{0:03d}.obj"), "w") as f:
-                f.writelines([f"v {v[0]} {v[1]} {v[2]}\n" for v in self.test_frame_verts[0].detach().cpu().numpy()])
-                f.writelines(vt_f)
-            all_verts.append(self.test_frame_verts[0])
+            next_frame = 1
+            evaluation_state = Path(self.output_path) / "native_eval_state.pt"
+            evaluation_context = {}
+            if checkpoint_eval:
+                evaluation_context = {
+                    **self.resume_context,
+                    "dataset_type": self.args.dataset_type,
+                    "num_processes": self.accelerator.num_processes,
+                    "n_traditional": self.n_traditional,
+                    "num_frames": self.scene.test_frame_num,
+                    "evaluation_frame_ids": list(self.scene.test_frame_index),
+                    "subject": self.args.subject,
+                    "train_take": self.args.train_take,
+                    "test_take": self.args.test_take,
+                    "smplx_gender": self.args.smplx_gender,
+                    "uv_path": os.path.abspath(self.scene.uv_path),
+                    "tracking_path": os.path.abspath(self.args.trained_model_path),
+                    "split_idx_path": os.path.abspath(self.split_idx_path),
+                    "material_path": os.path.abspath(self.args.init_params_path),
+                    "material": {key: value.detach().cpu().item() for key, value in self.torch_param.items()},
+                    "scale": self.scale.detach().cpu().tolist(),
+                    "shift": self.shift.detach().cpu().tolist(),
+                }
+            if checkpoint_eval and evaluation_state.is_file():
+                next_frame = restore_evaluation_state(
+                    evaluation_state, evaluation_context, self.mpm_state, self.mpm_solver,
+                )
+                for frame in range(next_frame):
+                    mesh_path = Path(mesh_dir) / f"{frame:03d}.obj"
+                    assert mesh_path.is_file(), mesh_path
+                    verts, _ = read_obj(str(mesh_path))
+                    all_verts.append(torch.from_numpy(verts).float().to(device))
+                print(f"Native evaluation resumes at frame {next_frame}/{self.scene.test_frame_num}", flush=True)
+            else:
+                mesh_path = Path(mesh_dir) / "000.obj"
+                write_path = mesh_path.with_suffix(".obj.tmp") if checkpoint_eval else mesh_path
+                with write_path.open("w") as f:
+                    f.writelines([f"v {v[0]} {v[1]} {v[2]}\n" for v in self.test_frame_verts[0].detach().cpu().numpy()])
+                    f.writelines(vt_f)
+                if checkpoint_eval:
+                    write_path.replace(mesh_path)
+                    save_evaluation_state(evaluation_state, next_frame, evaluation_context,
+                                          self.mpm_state, self.mpm_solver)
+                all_verts.append(self.test_frame_verts[0])
 
-            for i in tqdm(range(self.scene.test_frame_num - 1), desc="Simulation progress"):
+            for i in tqdm(range(next_frame - 1, self.scene.test_frame_num - 1), desc="Simulation progress"):
                 mesh_x = self.wld2sim(self.test_frame_collider[i].clone())
                 mesh_v = self.test_frame_collider_velo[i].clone() * self.scale
                 if "lower" in self.split_idx_path or "upper" in self.split_idx_path:
@@ -968,13 +1029,21 @@ class Trainer:
                 verts[self.reordered_cloth_v_idx] = cloth_verts
                 verts[self.reordered_human_v_idx] = human_verts
                 
-                with open(os.path.join(mesh_dir, f"{i+1:03d}.obj"), "w") as f:
+                mesh_path = Path(mesh_dir) / f"{i+1:03d}.obj"
+                write_path = mesh_path.with_suffix(".obj.tmp") if checkpoint_eval else mesh_path
+                with write_path.open("w") as f:
                     f.writelines([f"v {v[0]} {v[1]} {v[2]}\n" for v in verts.detach().cpu().numpy()])
                     f.writelines(vt_f)
+                if checkpoint_eval:
+                    write_path.replace(mesh_path)
+                    save_evaluation_state(evaluation_state, i + 2, evaluation_context,
+                                          self.mpm_state, self.mpm_solver)
                 all_verts.append(verts)
         
         if not skip_render:
             command_bake = ["blender", "-b", "-P", "blender/bake.py", "--", "--output_path", self.output_path]
+            if checkpoint_eval:
+                command_bake.append("--resume")
             subprocess.run(command_bake, check=True)
 
             if skip_sim:
@@ -1028,7 +1097,7 @@ class Trainer:
                     Image.fromarray(img_gt).save(img_gt_path)
 
                 if not skip_video:
-                    encode_comparison(Path(savedir), self.scene.test_frame_index)
+                    encode_comparison(Path(savedir), self.scene.test_frame_index, atomic=checkpoint_eval)
         
         return
 
@@ -1038,12 +1107,19 @@ def parse_args():
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument("--run_eval", action="store_true", default=False)
+    parser.add_argument("--checkpoint_eval", action="store_true",
+                        help="Preserve native 4D-DRESS held-out simulation at frame boundaries")
+    parser.add_argument("--checkpoint_material", action="store_true",
+                        help="Save native 4D-DRESS material fitting before its first update")
     parser.add_argument("--smplx_num_betas", type=int, default=300)
     parser.add_argument("--prescribed_surface_path", type=str, default="")
     parser.add_argument("--raw_collider_path", type=str, default="")
     parser.add_argument("--body_shape", action="store_true")
+    parser.add_argument("--joint_shape", action="store_true")
     parser.add_argument("--body_checkpoint", type=str, default="")
     parser.add_argument("--body_iterations", type=int, default=100)
+    parser.add_argument("--stop_after", type=int, default=0,
+                        help="Total fitting update cap; 0 runs the planned iteration target without changing its schedule")
     parser.add_argument("--beta_lr", type=float, default=0.01)
     parser.add_argument("--beta_epsilon", type=float, default=0.01)
     parser.add_argument("--body_batch_size", type=int, default=8)
@@ -1069,33 +1145,51 @@ def parse_args():
     model_args.prescribed_surface_path = args.prescribed_surface_path
     model_args.raw_collider_path = args.raw_collider_path
     model_args.body_shape = args.body_shape
+    model_args.joint_shape = args.joint_shape
     model_args.body_checkpoint = args.body_checkpoint
     model_args.body_iterations = args.body_iterations
+    model_args.stop_after = args.stop_after
     model_args.beta_lr = args.beta_lr
     model_args.beta_epsilon = args.beta_epsilon
     model_args.body_batch_size = args.body_batch_size
     assert not args.body_shape or (not args.run_eval and not args.resume and not args.body_checkpoint)
+    assert not args.joint_shape or (not args.body_shape and not args.run_eval and not args.resume and not args.body_checkpoint)
     assert not args.body_checkpoint or args.run_eval
+    planned_iterations = args.body_iterations if args.body_shape or args.joint_shape else args.iterations
+    assert 0 <= args.stop_after <= planned_iterations, "--stop_after must be within the planned iteration target"
+    assert not args.run_eval or args.stop_after == 0, "--stop_after is only supported for fitting"
     model_args.resume = args.resume
     model_args.resume_parameters = args.resume_parameters
+    model_args.checkpoint_eval = args.checkpoint_eval
+    model_args.checkpoint_material = args.checkpoint_material
+    assert not args.checkpoint_eval or args.run_eval
+    assert not args.checkpoint_material or not args.run_eval
     return model_args, op.extract(args), pp.extract(args), args.run_eval, args.skip_sim, args.skip_render, args.skip_video
 
 if __name__ == "__main__":
     args, opt, pipe, run_eval, skip_sim, skip_render, skip_video = parse_args()
     trainer = Trainer(args, opt, pipe, run_eval)
 
-    if args.body_shape:
+    if args.joint_shape:
+        from joint_shape import fit_joint_shape
+        fit_joint_shape(trainer, Path(args.dataset_dir), Path(args.init_params_path),
+                        iterations=args.body_iterations, learning_rate=args.beta_lr,
+                        finite_difference=args.beta_epsilon, batch_size=args.body_batch_size,
+                        resume=(Path(trainer.output_path) / "joint_shape_state.pt").is_file(), stop_after=args.stop_after)
+    elif args.body_shape:
         from body_shape import fit_body_shape
         fit_body_shape(trainer, Path(args.dataset_dir), Path(args.init_params_path),
                        iterations=args.body_iterations, learning_rate=args.beta_lr,
                        finite_difference=args.beta_epsilon, batch_size=args.body_batch_size,
-                       resume=(Path(trainer.output_path) / "body_shape_state.pt").is_file())
+                       resume=(Path(trainer.output_path) / "body_shape_state.pt").is_file(), stop_after=args.stop_after)
     elif run_eval:
         evaluation = Path(trainer.output_path)
         material = Path(args.init_params_path)
         with np.load(material, allow_pickle=False) as selected:
             material_step = int(selected["step"])
-        render_material(material.parent / "history.csv", evaluation / "material_fit_curves.png", material_step)
+            joint_material = "optimization_kind" in selected and str(selected["optimization_kind"]) == "joint_beta_material"
+        render_material(material.parent / "history.csv", evaluation / "material_fit_curves.png", material_step,
+                        loss_at_parameters=joint_material)
         if args.body_checkpoint:
             body = Path(args.body_checkpoint)
             with np.load(body, allow_pickle=False) as selected:

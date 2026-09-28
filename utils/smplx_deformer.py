@@ -1,6 +1,4 @@
 import os
-
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 import numpy as np
 import smplx

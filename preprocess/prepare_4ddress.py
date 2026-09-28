@@ -4,6 +4,7 @@ Template geometry and UVs come from the first training scan. Coincident vertices
 are welded, with the first source label retained, then separated by garment.
 Camera labels follow eth-ait/4d-dress/dataset/extract_garment.py: rasterize the
 original scan and use barycentric votes for the original vertex labels.
+Use --template-source to retain the shipped example template and garment splits.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import numpy as np
 from PIL import Image
 
 # Template command (mpmavatar environment, workspace root, allocated GPU):
-# python MPMAvatar/preprocess/prepare_4ddress.py --train-sequence ../datasets/4DDress/00190_Inner/Inner/Take2 --test-sequence ../datasets/4DDress/00190_Inner/Inner/Take5 --output data/MPMAvatar/4DDress/00190_Inner --smplx ../datasets/smplx --vposer ../datasets/vposer_v1_0/snapshots/TR00_E096.pt --train-start 11 --train-count 100 --test-start 11 --test-count 100 --labels 3 --stage all
+# python MPMAvatar/preprocess/prepare_4ddress.py --train-sequence ../datasets/4DDress/00190_Inner/Inner/Take2 --test-sequence ../datasets/4DDress/00190_Inner/Inner/Take5 --output data/MPMAvatar/4DDress/00190_Inner --smplx ../datasets/smplx --vposer ../datasets/vposer_v1_0/snapshots/TR00_E096.pt --train-start 11 --train-count 100 --test-start 11 --test-count 100 --labels 3 --template-source MPMAvatar/data/s190_t2 --stage all
 
 COLORS = np.array([[128, 128, 128], [255, 128, 0], [128, 0, 255],
                    [180, 50, 50], [50, 180, 50], [0, 128, 255]], dtype=np.uint8)
@@ -143,6 +144,26 @@ def build_template(sequence: Path, frame: int, garments: list[int], output: Path
 def link(source: Path, target: Path) -> None:
     assert source.exists(), source
     target.symlink_to(source.resolve(), target_is_directory=source.is_dir())
+
+
+def link_template(source: Path, garments: list[int], output: Path) -> dict[str, Any]:
+    """Preserve author vertex numbering and attachment splits in local assets."""
+    assert source.is_dir(), source
+    required = ["mesh_processed.obj", "cloth_vertices.npz"]
+    required += ["split_idx_upper.npz", "split_idx_lower.npz"] if garments == [3, 4] else ["split_idx.npz"]
+    for name in required:
+        assert (source / name).is_file(), source / name
+    files = [source / "mesh_processed.obj", source / "cloth_vertices.npz",
+             *sorted(source.glob("split_idx*.npz"))]
+    if (source / "fix_v.npy").is_file():
+        files.append(source / "fix_v.npy")
+    output.mkdir(parents=True)
+    for path in files:
+        link(path, output / path.name)
+    report = {"template_source": str(source), "linked_files": [path.name for path in files],
+              "vertex_numbering": "unchanged author assets", "garment_labels": garments}
+    (output / "template_report.json").write_text(json.dumps(report, indent=2) + "\n")
+    return report
 
 
 def sequence_info(path: Path, start: int, count: int, tracking: bool) -> dict[str, Any]:
@@ -285,6 +306,8 @@ def main() -> None:
     parser.add_argument("--test-start", type=int, required=True)
     parser.add_argument("--test-count", type=int, default=100)
     parser.add_argument("--labels", type=int, nargs="+", choices=(3, 4), required=True)
+    parser.add_argument("--template-source", type=Path,
+                        help="Link supplied native mesh/cloth/splits without changing vertex numbering")
     parser.add_argument("--stage", choices=("assets", "observations", "all"), default="all")
     args = parser.parse_args()
     output = args.output.resolve()
@@ -297,6 +320,8 @@ def main() -> None:
     assert train["take"] != test["take"], "Choose separate training and testing takes"
     config = {"train": train, "test": test, "labels": garments,
               "smplx": str(args.smplx.resolve()), "vposer": str(args.vposer.resolve())}
+    if args.template_source:
+        config["template_source"] = str(args.template_source.resolve())
     name = f"s{train['subject']}_t{train['take']}"
     relative = Path("data/4D-DRESS") / f"{train['subject']:05d}_Inner" / "Inner"
     if args.stage in ("assets", "all"):
@@ -311,7 +336,10 @@ def main() -> None:
         link(args.vposer, output / "data/body_models/TR00_E096.pt")
         for item in (train, test):
             sequence_links(Path(item["source"]), output / relative / f"Take{item['take']}")
-        report = build_template(Path(train["source"]), train["start"], garments, output / "data" / name)
+        if args.template_source:
+            report = link_template(args.template_source.resolve(), garments, output / "data" / name)
+        else:
+            report = build_template(Path(train["source"]), train["start"], garments, output / "data" / name)
         (output / "preparation.json").write_text(json.dumps(config, indent=2) + "\n")
         print(json.dumps(report, indent=2), flush=True)
     if args.stage in ("observations", "all"):

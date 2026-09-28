@@ -28,7 +28,8 @@ def read_history(path: Path, fields: tuple[str, ...]) -> dict[str, list[float]]:
     return values
 
 
-def render_material(history: Path, output: Path, selected_step: int | None = None) -> None:
+def render_material(history: Path, output: Path, selected_step: int | None = None,
+                    *, loss_at_parameters: bool = False) -> None:
     values = read_history(history, ("step", "loss", "D", "E", "H"))
     assert all(density > 0 for density in values["D"]), f"Nonpositive D in {history}"
     values["E / D"] = [youngs / density for youngs, density in zip(values["E"], values["D"])]
@@ -46,7 +47,8 @@ def render_material(history: Path, output: Path, selected_step: int | None = Non
                         f"{name} (export units)" if name in ("E", "E / D") else name)
         axis.grid(alpha=0.25)
     axes.flat[-1].axis("off")
-    fig.suptitle("MPMAvatar material fit · loss before update, D/E/H and E/D after update")
+    fig.suptitle("MPMAvatar joint fit · loss at listed beta and D/E/H" if loss_at_parameters else
+                 "MPMAvatar material fit · loss before update, D/E/H and E/D after update")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".png.tmp")
     fig.savefig(temporary, format="png", dpi=150)

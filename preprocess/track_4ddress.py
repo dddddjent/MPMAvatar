@@ -14,6 +14,7 @@ from pathlib import Path
 
 # Template command (mpmavatar environment, workspace root, allocated GPU):
 # python MPMAvatar/preprocess/track_4ddress.py --prepared data/MPMAvatar/4DDress/00190_Inner --render-python /work/nvme/bivb/junlinl6/conda/envs/synthetic_avatar/bin/python --stage all --wandb-entity ''
+# Resume: python MPMAvatar/preprocess/track_4ddress.py --prepared data/MPMAvatar/4DDress/examples/s191_t2 --render-python /work/nvme/bivb/junlinl6/conda/envs/synthetic_avatar/bin/python --stage all --wandb-entity '' --resume
 
 
 def run(command: list[str], cwd: Path) -> None:
@@ -28,6 +29,7 @@ def main() -> None:
                         help="Python executable with Blender bpy installed (synthetic_avatar)")
     parser.add_argument("--stage", choices=("tracking", "postprocess", "all"), default="all")
     parser.add_argument("--wandb-entity", default="", help="Empty uses ordinary console logging")
+    parser.add_argument("--resume", action="store_true", help="Continue the native frame-boundary checkpoint")
     args = parser.parse_args()
     prepared = args.prepared.resolve()
     config_path = prepared / "preparation.json"
@@ -48,11 +50,16 @@ def main() -> None:
             label = source / "Capture" / camera / "labels" / f"label-f{frame:05d}.png"
             assert label.is_file(), f"Generate observations first: {label}"
     if args.stage in ("tracking", "all"):
-        assert not output.exists(), f"Tracking output already exists: {output}"
+        if args.resume:
+            assert (output / "tracking_state.pt").is_file(), "A native tracking checkpoint is required"
+        else:
+            assert not output.exists(), f"Tracking output already exists: {output}"
         command = [sys.executable, str(repo / "preprocess/train_mesh_lbs_4ddress.py"),
                    "--save_name", save_name, "--seq", name, "--start_idx", str(train["start"]),
                    "--num_frames", str(train["count"]), "--labels", *map(str, config["labels"]),
                    "--data_path", str(source)]
+        if args.resume:
+            command.append("--resume")
         if args.wandb_entity:
             command += ["--wandb", "--wandb_entity", args.wandb_entity, "--wandb_name", f"track_{save_name}"]
         run(command, cwd)
@@ -63,7 +70,7 @@ def main() -> None:
         run([sys.executable, str(repo / "blender/add_uv_4ddress.py"),
              "--uv_path", str(assets / "mesh_processed.obj"), "--output_path", str(output)], cwd)
         run([str(args.render_python.resolve()), str(repo / "blender/bake.py"), "--",
-             "--output_path", str(output), "--ao_res", "256"], cwd)
+             "--output_path", str(output), "--ao_res", "256", "--resume"], cwd)
         first = f"mesh-f{train['start']:05d}_smplx"
         run([sys.executable, str(repo / "preprocess/lbs_weights_inpainting_4ddress.py"),
              "--smplx_gender", train["gender"], "--src_mesh_path", str(source / "SMPLX" / f"{first}.ply"),

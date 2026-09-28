@@ -1,3 +1,6 @@
+import argparse
+from pathlib import Path
+
 import torch
 import os
 import json
@@ -19,6 +22,10 @@ from utils.geo_utils import compute_vertex_normals, compute_face_normals, \
 from losses.physics import collision_penalty
 from plyfile import PlyData
 from pytorch3d.structures.meshes import Meshes
+from tracking_checkpoint import restore_checkpoint, save_checkpoint
+
+# Template command (mpmavatar, prepared subject's preprocess directory):
+# python /projects/bivb/junlinl6/Documents/clothes-reconstruction/MPMAvatar/preprocess/train_mesh_lbs_4ddress.py --exp_name tracking --seq s191_t2 --save_name s191_t2_21_100 --start_idx 21 --num_frames 100 --labels 3 --data_path ../data/4D-DRESS/00191_Inner/Inner/Take2 --resume
 
 SURFACE_LABEL_COLOR = np.array([[128, 128, 128], [255, 128, 0], [128, 0, 255], [180, 50, 50], [50, 180, 50], [0, 128, 255]])
 
@@ -425,28 +432,6 @@ def initialize_post_first_timestep(params, variables, optimizer):
             param_group['lr'] = 0.0
     return variables
 
-def resume_timestep(params, variables, args):
-    ori_params = dict(np.load(os.path.join('../output', args.exp_name, args.save_name, 'params_{}.npz'.format(args.start_idx))))
-    resume_params = dict(np.load(os.path.join('../output', args.exp_name, args.save_name, 'params_{}.npz'.format(args.resume_t))))
-    ori_params.update(resume_params)
-    params['vertices'] = torch.from_numpy(ori_params['vertices']).float().cuda()
-    params['log_scales'] = torch.from_numpy(ori_params['log_scales']).float().cuda()
-    params['logit_opacities'] = torch.from_numpy(ori_params['logit_opacities']).float().cuda()
-    params['cam_m'] = torch.from_numpy(ori_params['cam_m']).float().cuda()
-    params['cam_c'] = torch.from_numpy(ori_params['cam_c']).float().cuda()
-    params['rgb_colors'] = torch.from_numpy(ori_params['rgb_colors']).float().cuda()
-    params = {k: v.requires_grad_() for k, v in params.items()}
-
-    vertices = params['vertices'].detach()
-    faces = variables['faces'].detach()
-    normals = compute_face_normals(vertices, faces)
-    rots = compute_q_from_faces(vertices, faces, normals)
-
-    variables["prev_pts"] = vertices
-    variables["prev_rot"] = torch.nn.functional.normalize(rots).detach()
-
-    return params, variables
-
 def report_progress(params, variables, data, i, progress_bar, num_iter_per_timestep, every_i=100):
     if i % every_i == 0 or i == num_iter_per_timestep-1:
         im, _, _, msk, _, cloth_mask = Renderer(raster_settings=data['cam'])(**params2rendervar(params, variables))
@@ -501,7 +486,7 @@ def report_progress(params, variables, data, i, progress_bar, num_iter_per_times
         wandb.log({"lower mask frame {} step {}".format(data['t'], i): [wandb.Image(save_img_lower_mask, caption="cloth pred/gt; full img pred/gt")]})
 
 
-def train(args):
+def train(args: argparse.Namespace) -> None:
     start_idx = args.start_idx
     num_timesteps = args.num_frames
     params, variables = initialize_params(args)
@@ -512,16 +497,20 @@ def train(args):
 
     lbs_deformer = SmplxDeformer(model_path="../data/body_models", gender=gender, num_betas=10, use_pca=True)
 
-    resume_idx = start_idx if not args.resume else args.resume_t
-    if args.resume:
-        print("resuming from timestep {}".format(resume_idx))
-        params, variables = resume_timestep(params, variables, args)
-        optimizer = initialize_optimizer(params, variables, args)
+    checkpoint_path = Path('../output') / args.exp_name / args.save_name / 'tracking_state.pt'
     beta = None
-    for t in range(resume_idx, resume_idx + num_timesteps):
+    next_t = start_idx
+    if args.resume:
+        next_t, beta = restore_checkpoint(checkpoint_path, args, params, variables, optimizer)
+        print(f'resuming from timestep {next_t}')
+    else:
+        assert not checkpoint_path.exists(), f'Use --resume for an existing checkpoint: {checkpoint_path}'
+        save_checkpoint(checkpoint_path, args, next_t, params, variables, optimizer, beta)
+    end_t = start_idx + num_timesteps
+    for t in range(next_t, end_t):
         dataset = get_dataset(t, args)
         todo_dataset = []
-        is_initial_timestep = (t == resume_idx)
+        is_initial_timestep = (t == start_idx)
         if not is_initial_timestep:
             optimizer = set_optimizer_lr(optimizer, variables, args, is_initial_timestep)
             params, variables = initialize_per_timestep(params, variables, optimizer)
@@ -611,6 +600,7 @@ def train(args):
 
         os.makedirs(f"../output/{args.exp_name}/{args.save_name}", exist_ok=True)
         np.savez(f"../output/{args.exp_name}/{args.save_name}/params_{t}", **output_params)
+        save_checkpoint(checkpoint_path, args, t + 1, params, variables, optimizer, beta)
 
 if __name__ == "__main__":
     import argparse
@@ -647,8 +637,8 @@ if __name__ == "__main__":
     parser.add_argument('--smplx_dis_weight', type=float, default=1)
     parser.add_argument('--downsample_view', type=int, default=1)
 
-    parser.add_argument('--resume', action='store_true', default=False)
-    parser.add_argument('--resume_t', type=int, default=11)
+    parser.add_argument('--resume', action='store_true', default=False,
+                        help='Resume tracking_state.pt at the next unfinished frame')
 
 
 

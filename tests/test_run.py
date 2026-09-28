@@ -312,6 +312,42 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "only supported for --stage evaluate"):
             self.launch("material", "--body-checkpoint", "body.npz")
 
+    def test_joint_stage_and_paired_evaluation(self) -> None:
+        self.manifest.update(body_model="smplx", body_shape_experiment={
+            "prediction_body": "fitted_smplx", "body_motion": "preparation/collider.npz",
+            "perturbation": {"beta_index": 4},
+        })
+        self.write_manifest()
+        collider = self.root / "preparation/collider.npz"
+        collider.parent.mkdir()
+        collider.touch()
+        self.checkpoint("appearance/point_cloud/timestep_030000/point_cloud.ply")
+        material = self.checkpoint("material/seed0/last_param_00007.npz")
+        command = self.launch("joint", "--checkpoint", str(material), "--body-iterations", "9",
+                              "--material-iterations", "200", "--material-frames", "3", "--stop-after", "2")
+        self.assertIn("--joint_shape", command)
+        self.assertNotIn("--body_shape", command)
+        for flag, value in (("--save_name", "joint"), ("--init_params_path", str(material)),
+                            ("--iterations", "9"), ("--body_iterations", "9"), ("--stop_after", "2")):
+            self.assertEqual(command[command.index(flag) + 1], value)
+        paired = self.checkpoint("joint/seed0/best_joint_shape.npz")
+        command = self.launch("evaluate", "--checkpoint", str(paired), "--body-checkpoint", str(paired),
+                              "--material-frames", "3", "--skip-render")
+        self.assertEqual(command[command.index("--body_checkpoint") + 1], str(paired))
+        self.assertEqual(command[command.index("--init_params_path") + 1], str(paired))
+
+    def test_stop_after_routes_fitting_caps_and_rejects_invalid_targets(self) -> None:
+        self.checkpoint("appearance/point_cloud/timestep_030000/point_cloud.ply")
+        command = self.launch("material", "--material-iterations", "3", "--stop-after", "1")
+        self.assertEqual(command[command.index("--iterations") + 1], "3")
+        self.assertEqual(command[command.index("--stop_after") + 1], "1")
+        for stage in ("appearance", "evaluate"):
+            with self.subTest(stage=stage), self.assertRaisesRegex(AssertionError, "only supported for material/body/joint"):
+                self.launch(stage, "--stop-after", "1")
+        for cap in ("-1", "4"):
+            with self.subTest(cap=cap), self.assertRaisesRegex(AssertionError, "planned iteration target"):
+                self.launch("material", "--material-iterations", "3", "--stop-after", cap)
+
 
 if __name__ == "__main__":
     unittest.main()

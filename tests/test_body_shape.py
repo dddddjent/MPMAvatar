@@ -55,13 +55,13 @@ class BodyShapeTests(unittest.TestCase):
         )
 
     def fit(self, trainer: SimpleNamespace, iterations: int, resume: bool = False,
-            finite_difference: float = 0.01) -> tuple[dict[str, Any], str]:
+            finite_difference: float = 0.01, stop_after: int = 0) -> tuple[dict[str, Any], str]:
         output = io.StringIO()
         with patch("body_shape.SingleBetaBody", return_value=self.body), patch(
             "body_shape.geometry_loss", side_effect=self.objective
         ), redirect_stdout(output):
             fit_body_shape(trainer, self.source, self.material, iterations=iterations,
-                           learning_rate=0.1, finite_difference=finite_difference, resume=resume)
+                           learning_rate=0.1, finite_difference=finite_difference, resume=resume, stop_after=stop_after)
         state = torch.load(Path(trainer.output_path) / "body_shape_state.pt", weights_only=True)
         return state, output.getvalue()
 
@@ -95,12 +95,15 @@ class BodyShapeTests(unittest.TestCase):
         with (root / "beta_history.csv").open(newline="") as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), 5)
 
-    def test_resumed_optimizer_matches_uninterrupted_fit_exactly(self) -> None:
+    def test_stop_cap_and_resumed_optimizer_match_uninterrupted_fit_exactly(self) -> None:
         complete, _ = self.fit(self.trainer("complete"), 9)
         resumed = self.trainer("resumed")
-        self.fit(resumed, 3)
+        partial, _ = self.fit(resumed, 9, stop_after=3)
+        self.assertEqual(partial["next_step"], 3)
+        self.assertEqual(partial["planned_iterations"], 9)
+        self.assertNotIn("stop_after_iterations", partial["context"])
         resumed.resume_context["iterations"] = 999
-        continuation, _ = self.fit(resumed, 9, resume=True)
+        continuation, _ = self.fit(resumed, 9, resume=True, stop_after=9)
         self.assertEqual(continuation["next_step"], 9)
         for field in ("last", "best", "history", "context"):
             self.assertEqual(continuation[field], complete[field])
@@ -108,6 +111,8 @@ class BodyShapeTests(unittest.TestCase):
             torch.testing.assert_close(continuation["optimizer"]["state"][0][key],
                                        complete["optimizer"]["state"][0][key], rtol=0, atol=0)
         self.assertEqual(continuation["optimizer"]["param_groups"], complete["optimizer"]["param_groups"])
+        summary = json.loads((Path(resumed.output_path) / "beta_summary.json").read_text())
+        self.assertEqual((summary["planned_iterations"], summary["stop_after_iterations"], summary["completed_iterations"]), (9, 9, 9))
 
     def test_resume_rejects_changed_simulation_or_material(self) -> None:
         trainer = self.trainer("resume guards")

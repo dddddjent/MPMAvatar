@@ -16,6 +16,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 from time import time
 from pathlib import Path
 from typing import Any
+from utils.appearance_sampler import StatefulRandomSampler, cycle_native
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -50,21 +51,26 @@ def convert_SH(
 
 def training(dataset: Any, opt: Any, pipe: Any, testing_iterations: list[int],
              saving_iterations: list[int], start_checkpoint: str | None,
-             checkpoint_iterations: list[int]) -> None:
+             checkpoint_iterations: list[int], checkpoint_sampler: bool) -> None:
     tb_writer = prepare_output_and_logger(dataset)
 
     gaussians = MeshGaussianModel(dataset.sh_degree, device="cuda")
     scene = Scene(dataset, gaussians, return_type="image", device="cuda", load_timestep=None)
 
-    train_dataloader = torch.utils.data.DataLoader(
+    loader_args: dict[str, Any] = {"shuffle": True}
+    if checkpoint_sampler:
+        assert dataset.dataset_type == "4ddress"
+        sampler = StatefulRandomSampler(scene.train_dataset)
+        loader_args = {"sampler": sampler}
+    train_loader = torch.utils.data.DataLoader(
         scene.train_dataset,
         batch_size=1,
-        shuffle=True,
         drop_last=False,
         num_workers=0,
         collate_fn=scene.collate_fn,
+        **loader_args,
     )
-    train_dataloader = cycle(train_dataloader)
+    train_dataloader = cycle_native(train_loader, sampler) if checkpoint_sampler else cycle(train_loader)
 
     test_dataloader = torch.utils.data.DataLoader(
         scene.test_dataset,
@@ -96,14 +102,31 @@ def training(dataset: Any, opt: Any, pipe: Any, testing_iterations: list[int],
         # Our training checkpoint includes NumPy scalars from the scene radius/LRs.
         state = torch.load(start_checkpoint, weights_only=False)
         assert state["context"] == context, "Resume requires the same appearance fitting settings"
+        assert ("sampler" in state) == checkpoint_sampler, "Resume requires the same sampler checkpoint option"
         gaussians.restore_training(state["model"], opt)
         first_iteration = state["iteration"]
         bg = state["background"]
+        if checkpoint_sampler:
+            sampler.load_state_dict(state["sampler"])
         torch.set_rng_state(state["rng_cpu"].cpu())
         torch.cuda.set_rng_state_all([value.cpu() for value in state["rng_cuda"]])
         print(f"Resuming appearance after iteration {first_iteration} with optimizer state", flush=True)
     else:
         gaussians.training_setup(opt)
+
+    def save_training_state(iteration: int) -> None:
+        temporary = Path(dataset.model_path) / "training_state.pt.tmp"
+        state = {"iteration": iteration, "model": gaussians.capture_training(),
+                 "context": context, "background": bg,
+                 "rng_cpu": torch.get_rng_state(),
+                 "rng_cuda": torch.cuda.get_rng_state_all()}
+        if checkpoint_sampler:
+            state["sampler"] = sampler.state_dict()
+        torch.save(state, temporary)
+        temporary.replace(Path(dataset.model_path) / "training_state.pt")
+
+    if checkpoint_sampler and not start_checkpoint:
+        save_training_state(0)
 
     tb_image_idx = np.linspace(0, scene.test_frame_num-1, 5).astype(np.int32)
 
@@ -278,12 +301,7 @@ def training(dataset: Any, opt: Any, pipe: Any, testing_iterations: list[int],
             gaussians.optimizer.zero_grad(set_to_none = True)
 
             if iteration % 1000 == 0 or iteration in checkpoint_iterations or iteration in saving_iterations or iteration == iterations:
-                temporary = Path(dataset.model_path) / "training_state.pt.tmp"
-                torch.save({"iteration": iteration, "model": gaussians.capture_training(),
-                            "context": context, "background": bg,
-                            "rng_cpu": torch.get_rng_state(),
-                            "rng_cuda": torch.cuda.get_rng_state_all()}, temporary)
-                temporary.replace(Path(dataset.model_path) / "training_state.pt")
+                save_training_state(iteration)
 
             if iteration in saving_iterations or iteration == iterations:
                 print(f"\n[Iteration {iteration}] Saving Gaussians")
@@ -333,6 +351,8 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--checkpoint_sampler", action="store_true",
+                        help="Preserve the native 4DDress shuffled epoch when resuming")
     args = parser.parse_args(sys.argv[1:])
     args.test_iterations.extend(list(range(5_000, 30_000+1, 5_000)))
     args.save_iterations.extend(list(range(5_000, 30_000+1, 5_000)))
@@ -345,7 +365,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations,
-             args.save_iterations, args.start_checkpoint, args.checkpoint_iterations)
+             args.save_iterations, args.start_checkpoint, args.checkpoint_iterations, args.checkpoint_sampler)
 
     # All done
     print("\nTraining complete.")

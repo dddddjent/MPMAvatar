@@ -4,19 +4,23 @@ from glob import glob
 import sys
 import argparse
 
+# Template command (synthetic_avatar environment, allocated GPU):
+# python MPMAvatar/blender/bake.py -- --output_path data/MPMAvatar/4DDress/examples/s190_t2/output/phys/s190_t2/seed0 --ao_res 256 --resume
+
 class ArgumentParserForBlender(argparse.ArgumentParser):
-    def _get_argv_after_doubledash(self):
+    def _get_argv_after_doubledash(self) -> list[str]:
         try:
             idx = sys.argv.index("--")
             return sys.argv[idx+1:]
         except ValueError as e:
             return []
-    def parse_args(self):
+    def parse_args(self) -> argparse.Namespace:
         return super().parse_args(args=self._get_argv_after_doubledash())
 
 parser = ArgumentParserForBlender()
 parser.add_argument("--output_path", type=str, default="./output")
 parser.add_argument("--ao_res", type=int, default=256)
+parser.add_argument("--resume", action="store_true", help="Keep completed AO maps and save new maps atomically")
 args = parser.parse_args()
 
 bpy.data.scenes[0].render.engine = "CYCLES"
@@ -43,6 +47,13 @@ os.makedirs(aomapdir, exist_ok=True)
 meshfiles = sorted(glob(os.path.join(meshdir, "*.obj")))
 
 for idx, meshfile in enumerate(meshfiles):
+    image_path = os.path.join(aomapdir, os.path.basename(meshfile).replace("obj", "png"))
+    if args.resume and os.path.isfile(image_path):
+        completed = bpy.data.images.load(image_path, check_existing=False)
+        assert tuple(completed.size) == (args.ao_res, args.ao_res), image_path
+        bpy.data.images.remove(completed)
+        print(f"Keeping completed AO map: {image_path}", flush=True)
+        continue
     bpy.ops.object.select_all(action='DESELECT')
     bpy.ops.object.select_all()
     bpy.ops.object.delete()
@@ -73,8 +84,10 @@ for idx, meshfile in enumerate(meshfiles):
     bpy.ops.object.bake(type='AO')
 
     # Save the baked image
-    image.filepath_raw = os.path.join(aomapdir, os.path.basename(meshfile).replace("obj", "png"))
+    image.filepath_raw = image_path + ".tmp.png" if args.resume else image_path
     image.file_format = "PNG"
     image.save()
+    if args.resume:
+        os.replace(image.filepath_raw, image_path)
 
     bpy.data.images.remove(image)
