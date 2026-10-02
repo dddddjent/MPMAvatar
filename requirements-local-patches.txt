@@ -1,0 +1,3 @@
+# Activate mpmavatar, then: pip install -r MPMAvatar/requirements-local-patches.txt
+# NumPy, SciPy, Trimesh, PyTorch, and Warp come from the native MPMAvatar environment.
+rtree

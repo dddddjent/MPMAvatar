@@ -96,6 +96,10 @@ fit_material() {
     local train_start=$3
     local state="$PHYS/$save_name/seed0/training_state.pt"
     local resume_args=()
+    if [[ -f "$PHYS/$save_name/seed0/best_param_00199.npz" ]]; then
+        echo "Material fit already complete: $save_name"
+        return
+    fi
     if [[ -e "$PHYS/$save_name" ]]; then
         assert_file "$state"
         resume_args=(--resume)
@@ -129,6 +133,10 @@ simulate_part() {
 
 evaluate() {
     cd "$REPO"
+    if [[ -f "$PHYS/$NAME/seed0/metric.npz" ]]; then
+        echo "Evaluation already complete: $PHYS/$NAME/seed0/metric.npz"
+        return
+    fi
     assert_file "$MODEL/point_cloud/timestep_030000/point_cloud.ply"
     if [[ "$SUBJECT" == 170 || "$SUBJECT" == 185 ]]; then
         simulate_part "${NAME}_upper" split_idx_upper.npz --skip_render
@@ -150,6 +158,11 @@ evaluate() {
 }
 
 printf 'Native 4D-DRESS subject %s, stage %s, destination %s\n' "$SUBJECT" "$STAGE" "$PREPARED"
+if [[ "$STAGE" == physics || "$STAGE" == evaluate ]]; then
+    # Duplicate A40/A100 chains share outputs; one job per subject holds this Lustre flock.
+    exec 9>"$PREPARED/.pipeline.lock"
+    flock -n 9 || { echo "Subject $SUBJECT is locked by another job; exiting"; exit 0; }
+fi
 case "$STAGE" in
     all) prepare; tracking; appearance; physics; evaluate ;;
     *) "$STAGE" ;;

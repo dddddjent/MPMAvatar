@@ -9,6 +9,86 @@ runs native tracking, UV transfer, AO and skin-weight inpainting. See the
 `preprocess/compare_4ddress_templates.py` compares geometry, UVs, connectivity and
 garment partitions against author assets independently of vertex numbering.
 
+## Local-grid patch fitting: subject 185 lower
+
+`local_patch_fit.py` implements independent small MPM domains for the existing
+subject-185 lower garment. The original-spacing contact-free survey found no
+patch meeting the 16-scored-vertex minimum; results and commands are tracked
+in the workspace README. Activate
+`mpmavatar` and install the additional
+proximity dependency from the workspace root:
+
+```sh
+pip install -r MPMAvatar/requirements-local-patches.txt
+```
+
+The `prepare` stage reads native tracked vertices plus the 30,000-update
+appearance offsets. Specify the Take1 reference windows with `--windows`.
+Clearance is sampled at lower vertices and triangle centroids
+against SMPL-X and all tracking triangles outside lower cloth; the native
+32-edge mouth opening is capped in an in-memory clearance-query copy, with the
+cap required to lie above the complete lower garment. Lower self
+proximity uses non-neighbor vertex pairs. The prescribed collar also meets the
+sampled clearance criterion. This does not certify separation between samples
+or frames. Selection fails clearly if the requested eligible patch is absent.
+`--core-vertex-ids` selects explicit original tracking vertex IDs;
+`--max-core-vertices`, `--count`, and `--collar-rings` control automatic selection.
+
+Triangle topology is unchanged. Each patch has a fixed grid origin and a cube
+covering its reference window with padding. Cell spacing now matches original
+MPMAvatar: `h = 2 * global_bbox_extent / 200`, where the global extent is the
+full lower garment's longest dimension at frame 45. For this subject h is
+7.749 mm. The native whole-garment grid uses 200³ nodes in a cube of side twice
+that global extent. `--padding-cells` sets margins in original-spacing units
+(minimum/default 4). The default timestep is the original 400 substeps per frame.
+The discarded 0.969-mm trials and their outputs have been removed.
+Use the same padding for fitting, evaluation and convergence. The native
+full-lower scale from frame 45 and rest geometry from frame 11 remain fixed.
+Gravity, thickness, material units and anisotropic constants retain native
+simulation units. Refining this grid does not renormalize the patch geometry.
+
+The collar follows linearly interpolated tracked positions exactly at every
+substep. Scored interior vertices have a three-cell Chebyshev separation from
+prescribed vertex and fully prescribed face-center particles. The runner checks
+the actual support on every substep and fails if collar grid velocities reach scored vertices or a
+particle escapes its supported grid domain. Local vertex transfers have no
+domain clipping. Colliders are omitted for these sampled contact-free patches.
+
+The `fit` stage shares E and rest-height H across all patches and windows, with
+fixed `--density`, central finite differences in log-E/H and Adam. E uses the
+native exported modulus units. Loss excludes prescribed vertices and initialized
+frames and is weighted by scored vertex-frame count. Grid-node arrays remain
+dense within each small domain. Physics stages require an allocated CUDA device;
+`--help` and preparation do not initialize CUDA.
+The `survey` stage reports all eligible connected regions, including those with
+no scored interior at the requested spacing. It does not start optimization.
+It also caches per-frame clearance masks and full lower geometry.
+`local_patch_support_survey.py` diagnoses all sliding windows using actual
+3×3×3 footprints at reference interpolation substeps; production selection and
+the simulated-trajectory leakage guard remain unchanged.
+Fit history records base-rollout, four-probe gradient, and iteration wall time.
+
+Commands are in the [workspace README](../README.md). Fits save `history.csv`,
+`summary.json`, `initial_param.npz`, `best_param.npz`, `last_param.npz`, and best predictions. Each
+parameter checkpoint's loss belongs to those exact parameters. The atomic
+`optimizer_state.json` owns Adam moments, the next point and completed history;
+resume regenerates derived reports and uses its frozen `patches/` input snapshot.
+Use the same options with `--resume`, or `--stop-after N` for a resumable early
+stop within the planned `--iterations` target.
+
+`evaluate` reports interior mean vertex distance, 3D vertex RMSE, XYZ MSE,
+per-frame errors, collar drift and grid leakage for a frozen checkpoint.
+Grid dimensions and physical spacing are saved separately for each patch.
+`convergence` compares frozen-material trajectories across `--cell-size-factors`
+(default 1, 0.5 times the original spacing) and substep counts (400 / 800) against
+the finest grid and largest substep count,
+with `--convergence-tolerance-mm` (default 0.5). These are predictions conditioned
+on recorded collar motion. Whole-garment future prediction must be evaluated
+separately using the fitted D/E/H; the new NPZ files expose the native keys.
+`local_patch_native_training.py` evaluates frozen material files on the original
+full 45–56 training window with native contact and attachment movers; it matches
+the original XYZ-MSE metric and saves trajectories and per-frame vertex RMSE.
+
 ## Prepared dataset input
 
 Activate the existing `mpmavatar` environment. `run.py` accepts completed
