@@ -26,6 +26,14 @@ def read_parameters(path: Path) -> dict[str, Any]:
                 if key in data}
 
 
+def converged(directory: Path, patience: int, tolerance: float) -> bool:
+    """Whether the best loss improved by less than `tolerance` (relative) over the last `patience` updates."""
+    losses = [read_parameters(path)["loss"] for path in parameter_files(directory)]
+    # The trainer's best loss starts at 1.0.
+    best = np.minimum.accumulate(np.concatenate([[1.0], losses]))[1:]
+    return len(best) > patience and best[-1] > best[-1 - patience] * (1.0 - tolerance)
+
+
 def export_progress(directory: Path, last_step: int | None = None, *, planned_iterations: int = 0,
                     stop_after_iterations: int = 0) -> None:
     paths = parameter_files(directory)

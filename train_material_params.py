@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import os
 import sys
 import subprocess
@@ -28,7 +29,7 @@ from utils.render_utils import render_mesh
 from evaluation_video import encode_comparison
 from collider_motion import load_raw_collider
 from dataset_input import load_manifest
-from material_progress import export_progress, restore_training_state, save_training_state
+from material_progress import converged, export_progress, restore_training_state, save_training_state
 from fit_curves import render_body, render_material
 
 import warp as wp
@@ -848,16 +849,22 @@ class Trainer:
     def train(self) -> None:
         assert 0 <= self.args.stop_after <= self.iterations, "Material stop-after must be within the planned iteration target"
         end_step = self.args.stop_after or self.iterations
-        if self.step >= end_step:
-            print(f"Material already completed {self.step} iterations: {self.output_path}", flush=True)
-            return
+        patience, tolerance = self.args.early_stop_patience, self.args.early_stop_tol
         for index in tqdm(range(self.step, end_step), desc="Training progress"):
+            if patience and converged(Path(self.output_path), patience, tolerance):
+                print(f"Material converged after {self.step} updates: best loss improved < {tolerance:.1%} "
+                      f"over the last {patience}", flush=True)
+                break
             self.train_one_step()
             if self.accelerator.is_main_process:
                 self.save()
             self.accelerator.wait_for_everyone()
             self.step += 1
         print(f"Material completed {self.step}/{self.iterations} planned updates (stop-after {end_step})", flush=True)
+        if self.step == self.iterations or (patience and converged(Path(self.output_path), patience, tolerance)):
+            # The fit's final parameters: the best checkpoint of the last completed update.
+            shutil.copyfile(Path(self.output_path) / f"best_param_{self.step - 1:05d}.npz",
+                            Path(self.output_path) / "best_param_final.npz")
 
     def save(self) -> None:
         initial_state = {
@@ -1120,6 +1127,10 @@ def parse_args():
     parser.add_argument("--body_iterations", type=int, default=100)
     parser.add_argument("--stop_after", type=int, default=0,
                         help="Total fitting update cap; 0 runs the planned iteration target without changing its schedule")
+    parser.add_argument("--early_stop_patience", type=int, default=0,
+                        help="Stop fitting when the best loss improved by less than --early_stop_tol (relative) "
+                             "over this many updates; 0 runs all planned updates")
+    parser.add_argument("--early_stop_tol", type=float, default=0.0)
     parser.add_argument("--beta_lr", type=float, default=0.01)
     parser.add_argument("--beta_epsilon", type=float, default=0.01)
     parser.add_argument("--body_batch_size", type=int, default=8)
@@ -1149,6 +1160,8 @@ def parse_args():
     model_args.body_checkpoint = args.body_checkpoint
     model_args.body_iterations = args.body_iterations
     model_args.stop_after = args.stop_after
+    model_args.early_stop_patience = args.early_stop_patience
+    model_args.early_stop_tol = args.early_stop_tol
     model_args.beta_lr = args.beta_lr
     model_args.beta_epsilon = args.beta_epsilon
     model_args.body_batch_size = args.body_batch_size

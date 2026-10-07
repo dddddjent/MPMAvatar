@@ -486,6 +486,24 @@ def report_progress(params, variables, data, i, progress_bar, num_iter_per_times
         wandb.log({"lower mask frame {} step {}".format(data['t'], i): [wandb.Image(save_img_lower_mask, caption="cloth pred/gt; full img pred/gt")]})
 
 
+def rest_skinning_weights(lbs_deformer: SmplxDeformer, save_path: str, start_idx: int) -> torch.Tensor:
+    """Skinning weights of the tracked template, queried once at the rest frame (start_idx, its saved mesh and SMPL-X).
+
+    The original warp re-queried the k nearest SMPL-X vertices every frame; where a hand touches the hip or face that blends
+    joints rotated ~180 degrees apart into a singular matrix whose inverse throws surface vertices metres away.
+    """
+    mesh_path = os.path.join(save_path, f"mesh_cloth_{start_idx}.obj")
+    smplx_path = os.path.join(save_path, "smplx", f"{str(start_idx).zfill(6)}.pth")
+    assert os.path.isfile(mesh_path), mesh_path
+    assert os.path.isfile(smplx_path), smplx_path
+    with open(mesh_path) as stream:
+        vertices = np.array([line.split()[1:4] for line in stream if line.startswith("v ")], dtype=np.float32)
+    smplx_param = {k: v.detach() for k, v in torch.load(smplx_path, map_location="cuda", weights_only=False).items() if isinstance(v, torch.Tensor)}
+    _, _, weights = lbs_deformer.transform_to_t_pose(torch.from_numpy(vertices).cuda().unsqueeze(0), lbs_deformer.smplx_forward_simple(smplx_param),
+                                                     smplx_param['transl'], torch.tensor(1).cuda())
+    return weights
+
+
 def train(args: argparse.Namespace) -> None:
     start_idx = args.start_idx
     num_timesteps = args.num_frames
@@ -507,6 +525,7 @@ def train(args: argparse.Namespace) -> None:
         assert not checkpoint_path.exists(), f'Use --resume for an existing checkpoint: {checkpoint_path}'
         save_checkpoint(checkpoint_path, args, next_t, params, variables, optimizer, beta)
     end_t = start_idx + num_timesteps
+    rest_w = None
     for t in range(next_t, end_t):
         dataset = get_dataset(t, args)
         todo_dataset = []
@@ -591,10 +610,13 @@ def train(args: argparse.Namespace) -> None:
             smplx_param1['betas'] = beta
             smplx = lbs_deformer.smplx_forward_simple(smplx_param0)
             smplx1 = lbs_deformer.smplx_forward_simple(smplx_param1)
-            t_human_v, transform_matrix, lbs_w = lbs_deformer.transform_to_t_pose(human_v, smplx, smplx_param0['transl'], torch.tensor(1).cuda())
+            if rest_w is None:
+                rest_w = rest_skinning_weights(lbs_deformer, save_path, start_idx)
+            assert rest_w.shape[1] == human_v.shape[1], (rest_w.shape, human_v.shape)
+            t_human_v, transform_matrix, _ = lbs_deformer.transform_to_t_pose(human_v, smplx, smplx_param0['transl'], torch.tensor(1).cuda(), lbs_w=rest_w)
 
             t_human_v = t_human_v.squeeze().unsqueeze(0)
-            t_human_v1, transform_matrix1 = lbs_deformer.transform_to_pose(t_human_v, lbs_w, smplx1, smplx_param1['transl'], torch.tensor(1).cuda())
+            t_human_v1, transform_matrix1 = lbs_deformer.transform_to_pose(t_human_v, rest_w, smplx1, smplx_param1['transl'], torch.tensor(1).cuda())
 
             params['vertices'][v_idx] = t_human_v1.squeeze()
 
