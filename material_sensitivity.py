@@ -110,6 +110,9 @@ def prepare(config_path: Path, output: Path) -> None:
 
 
 def build_trainer(config: dict[str, Any], output: Path, garment: str, parameter_set: str) -> Trainer:
+    if config.get("deterministic", False):
+        from simulation_runtime import configure_simulation
+        configure_simulation(True)
     from train_material_params import Trainer, parse_args
 
     prepared = Path(config["prepared"])
@@ -134,6 +137,8 @@ def build_trainer(config: dict[str, Any], output: Path, garment: str, parameter_
                 "--iterations", "200", "--init_params_path", "", "--material_gradient", "ad",
                 "--grid_size", str(config["grid_size"]), "--substep", str(config["substeps"]),
                 "--seed", str(config["seed"])]
+    if config.get("deterministic", False):
+        sys.argv.append("--deterministic")
     args, opt, pipe, run_eval, *_ = parse_args()
     trainer = Trainer(args, opt, pipe, run_eval)
     assert trainer.n_traditional == 0

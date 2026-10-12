@@ -255,6 +255,15 @@ Collision uses the exported raw body or fitted SMPL-X; neither adds pins. Free-c
 observations initialize the evaluation rollout only once using its first two
 frames; subsequent observations never reset the simulation. The export supplies the static simulation domain;
 ClothTransformer and D-Garment exclude future cloth from its bounds.
+`--deterministic` enables Warp 1.17 `GPU_TO_GPU` and deterministic PyTorch
+preparation for simulation on the same GPU architecture. The default retains
+ordinary atomics; native simulation methods
+and physical settings are unchanged. Add the flag to `run.py` simulation stages,
+`train_material_params.py`, `replay_material_window.py` or `run_demo.py`. Use a
+fresh process/output and keep the mode when resuming. Sensitivity campaigns can
+set `"deterministic": true` in their input config before preparation. This flag
+covers simulation; it does not guarantee deterministic appearance rendering.
+
 `evaluation/seed0/` contains `evaluation_predictions.npz` for scoring,
 `predictions.npz` and UV meshes for the selected rendering rollout, and
 `geometry_metrics.json`/`.md` (per-frame/mean V2V and XYZ MSE on free cloth,

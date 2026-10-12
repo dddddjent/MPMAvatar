@@ -1,6 +1,11 @@
 import argparse
 import os
 import sys
+from simulation_runtime import configure_simulation
+
+if "--deterministic" in sys.argv:
+    configure_simulation(True)
+
 import pickle
 import numpy as np
 from tqdm import tqdm
@@ -618,6 +623,8 @@ def parse_args():
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Repeatable Warp simulation on the same GPU architecture")
     parser.add_argument("--skip_sim", action="store_true", default=False)
     parser.add_argument("--skip_render", action="store_true", default=False)
     parser.add_argument("--skip_video", action="store_true", default=False)

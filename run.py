@@ -20,6 +20,7 @@ from dataset_input import common_arguments, load_manifest
 # Experimental material AD: --stage material --material-gradient ad (use a fresh output directory).
 # Reuse appearance: --appearance-model /path/to/baseline/appearance (material/evaluate only).
 # Fixed-beta evaluation: --render-appearance gt_lighting.
+# Repeatable simulation: append --deterministic for material/body/joint/evaluate.
 
 
 def main() -> None:
@@ -36,6 +37,8 @@ def main() -> None:
     parser.add_argument("--material-frames", default="all", help="all (the manifest's complete training prefix), or a count from 2 to its length")
     parser.add_argument("--grid-size", type=int, default=200)
     parser.add_argument("--substeps", type=int, default=400)
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Repeatable Warp simulation on the same GPU architecture; default keeps ordinary atomics")
     parser.add_argument("--checkpoint", type=Path,
                         help="Frozen material for body/evaluate or initial material for joint; required for body/joint, otherwise latest local last_param")
     parser.add_argument("--body-checkpoint", type=Path,
@@ -55,6 +58,7 @@ def main() -> None:
     parser.add_argument("--resume-parameters", action="store_true",
                         help="One-time material resume from old NPZ files, resetting Adam and the LR schedule")
     args = parser.parse_args()
+    assert args.stage != "appearance" or not args.deterministic, "--deterministic applies to simulation stages"
     assert args.material_gradient == "fd" or args.stage == "material", "--material-gradient ad is only supported for material fitting"
     planned_iterations = args.body_iterations if args.stage in ("body", "joint") else args.material_iterations
     assert 0 <= args.stop_after <= planned_iterations, "--stop-after must be between 0 and the planned iteration target"
@@ -120,6 +124,8 @@ def main() -> None:
                    "--smplx_num_betas", "10",
                    "--prescribed_surface_path", str(root / manifest["prescribed_surface"]),
                    "--grid_size", str(args.grid_size), "--substep", str(args.substeps)]
+        if args.deterministic:
+            command.append("--deterministic")
         if args.stage == "material":
             command += ["--material_gradient", args.material_gradient]
         if args.stage in ("material", "body", "joint"):

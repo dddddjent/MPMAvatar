@@ -4,6 +4,12 @@ import shutil
 import time
 import os
 import sys
+from simulation_runtime import configure_simulation
+
+# Warp snapshots its execution options when kernel modules are imported.
+if "--deterministic" in sys.argv:
+    configure_simulation(True)
+
 import subprocess
 from pathlib import Path
 import pickle
@@ -234,6 +240,8 @@ class Trainer:
             "nu": self.init_nu, "gamma": self.init_gamma, "kappa": self.init_kappa,
             "mesh_friction_coeff": self.mesh_friction_coeff, "friction_angle": self.friction_angle,
         }
+        if args.deterministic:
+            self.resume_context["warp_deterministic_mode"] = wp.config.deterministic.name
         if material_ad:
             self.resume_context["material_gradient"] = "checkpointed_ad"
         if args.checkpoint_material:
@@ -1224,6 +1232,8 @@ def parse_args() -> tuple[GroupParams, GroupParams, GroupParams, bool, bool, boo
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument("--run_eval", action="store_true", default=False)
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Repeatable Warp simulation on the same GPU architecture; use a fresh process/output")
     parser.add_argument("--material_gradient", choices=("fd", "ad"), default="fd",
                         help="Experimental checkpointed AD, or native finite differences for comparison")
     parser.add_argument("--material_gradient_check", type=str, default="",
@@ -1268,6 +1278,7 @@ def parse_args() -> tuple[GroupParams, GroupParams, GroupParams, bool, bool, boo
         args.local_rank = env_local_rank
 
     model_args = lp.extract(args)
+    model_args.deterministic = args.deterministic
     model_args.smplx_num_betas = args.smplx_num_betas
     model_args.material_gradient = args.material_gradient
     model_args.material_gradient_check = args.material_gradient_check
