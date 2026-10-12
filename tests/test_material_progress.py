@@ -17,7 +17,7 @@ from material_progress import export_progress, restore_training_state, save_trai
 
 
 def optimizer_bundle() -> tuple[dict[str, torch.Tensor], Any, Any]:
-    params = {key: torch.tensor(value) for key, value in zip(("D", "E", "H"), (1., 2., 3.))}
+    params = {key: torch.tensor(value, requires_grad=True) for key, value in zip(("D", "E", "H"), (1., 2., 3.))}
     optimizer = torch.optim.Adam([{"params": [value], "lr": 0.01 * (i + 1)}
                                   for i, value in enumerate(params.values())])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
@@ -27,7 +27,7 @@ def optimizer_bundle() -> tuple[dict[str, torch.Tensor], Any, Any]:
 def update(params: dict[str, torch.Tensor], optimizer: Any, scheduler: Any) -> None:
     optimizer.zero_grad()
     for value in params.values():
-        value.grad = value.square() / 7
+        value.grad = value.detach().square() / 7
     optimizer.step()
     scheduler.step()
 

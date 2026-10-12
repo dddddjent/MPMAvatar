@@ -84,6 +84,7 @@ def save_training_state(directory: Path, next_step: int, params: dict[str, torch
     temporary.replace(directory / "training_state.pt")
 
 
+@torch.no_grad()
 def restore_training_state(directory: Path, params: dict[str, torch.Tensor],
                            optimizer: Any, scheduler: Any, context: dict[str, Any],
                            resume_parameters: bool) -> dict[str, Any]:

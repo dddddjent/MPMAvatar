@@ -660,11 +660,12 @@ class MPMWARP(object):
     # move joint particles
     def add_particle_mover(
         self,
-        n_grid
-    ):
+        n_grid: int,
+        device: str | wp.Device = "cuda:0",
+    ) -> None:
         mover_param = Particle_mover()
-        mover_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=float, device="cuda:0")
-        mover_param.velocity = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device="cuda:0")
+        mover_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=float, device=device)
+        mover_param.velocity = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
 
         @wp.kernel
         def zero_grid(
@@ -804,17 +805,18 @@ class MPMWARP(object):
     # a mesh specified by a mesh_id
     def add_mesh_collider(
         self,
-        mesh_id,
-        n_grid,
-        friction=0.0,
-    ):
+        mesh_id: int,
+        n_grid: int,
+        friction: float = 0.0,
+        device: str | wp.Device = "cuda:0",
+    ) -> None:
         collider_param = Mesh_collider()
         collider_param.mesh_id = mesh_id
         collider_param.friction = friction
-        collider_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=float, device="cuda:0")
-        collider_param.mesh_v_in = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device="cuda:0")
-        collider_param.mesh_v_out = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device="cuda:0")
-        collider_param.mesh_normal = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device="cuda:0")
+        collider_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=float, device=device)
+        collider_param.mesh_v_in = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
+        collider_param.mesh_v_out = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
+        collider_param.mesh_normal = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
 
         @wp.kernel
         def zero_grid(

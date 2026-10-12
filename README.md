@@ -89,6 +89,86 @@ separately using the fitted D/E/H; the new NPZ files expose the native keys.
 full 45–56 training window with native contact and attachment movers; it matches
 the original XYZ-MSE metric and saves trajectories and per-frame vertex RMSE.
 
+## Differentiable material fitting (experimental)
+
+2026-10-07: `--material-gradient ad` connects D, E and H to a checkpointed
+PyTorch/Warp backward. Frame checkpoints contain positions, velocities, APIC C
+and the evolving triangle deformation d. During backward, one frame's particle
+states are replayed and a single substep tape is reused; grid buffers are rebuilt.
+Density controls mass, E controls the elastic coefficients, and H controls the
+rest metric. Internal E remains exported E / 100. The in-plane polar rotation
+uses its exact 2D formula to avoid singular SVD-vector derivatives at equal stretches.
+
+CPU local FD passes; the 800-step checkpoint/full-tape gradient error is
+1.2e-10. Native central FD passes 19/24 two-frame cases at 3% relative / 1e-8
+absolute tolerance, with failures at 40 and 400 substeps per frame. The
+[complete CPU report](output/differentiable_cpu/report.json) retains those failures. Yield-surface branches and float32 trajectory sensitivity are under
+investigation.
+
+2026-10-08 GPU (A100), 4D-DRESS 190 material window (frames 19-30, 400 substeps):
+AD loss matches native to 5e-4; AD vs native central FD (ε = 1% of value) is
+D 1.8%, E 1.5%, H 0.6% ([report](output/differentiable_gpu/s190_t2_frames12.json)).
+Smaller ε is limited by CUDA atomic nondeterminism (native repeat differs by 6e-8);
+replay is checked per field at 1e-4 relative (measured 1.1e-5). A 10-update AD fit
+lowered training loss 2.35e-4 → 5.62e-5 (no held-out eval).
+Commands (run inside a GPU allocation):
+
+```sh
+FRAMES=12 bash output/differentiable_gpu/run_s190_check.sh
+STOP=10 bash output/differentiable_gpu/run_s190_fit.sh
+```
+
+2026-10-08, 185 lower with the original FD fit settings (Take1 frames 45-56, 200 updates), held-out
+Take7 garment CD / F (`../README.md` initial-vs-fitted table). Same A100, no contention: AD 25.5 s/update,
+FD 36 s/update. AD and FD Adam paths agree through ~6 updates, then AD's E decreases more slowly;
+both reach the same minimum (FD D/E/H 1.03/83.2/0.869, AD 1.08/90.4/0.873). The early-stopped row's better
+test score comes from stopping at update 5 (E ≈ 229), not from AD.
+
+| Material | Updates | Best train loss | Take7 lower CD / F |
+| --- | ---: | ---: | --- |
+| Initial (D 1, E 100, H 1) | 0 | 9.17e-4 | 0.921 / 88.69 |
+| FD (`s185_t1_lower`) | 200 | 7.92e-5 (step 81) | 0.855 / 89.96 |
+| AD, early stop 40 / 1% | 46 | 1.46e-4 (step 5) | 0.786 / 90.86 |
+| AD, 200 updates | 200 | 7.90e-5 (step 176) | 0.855 / 89.96 |
+
+Grey video (scan / initial / FD / AD 200 updates): `output/differentiable_gpu/185_lower/grey_comparison.mp4`.
+
+```sh
+bash output/differentiable_gpu/run_s185_lower_driver.sh > output/differentiable_gpu/185_lower_driver.log 2>&1   # login node: fit then Take7 eval on GPU holders
+STAGE=eval_initial srun --jobid=<holder> --overlap --ntasks=1 --gpus=1 --cpus-per-task=4 --mem=32G bash output/differentiable_gpu/run_s185_lower.sh
+cd .. && python MPMAvatar/scripts/eval/score_native_garment.py --prediction-dir MPMAvatar/output/differentiable_gpu/185_lower/s185_t1_lower/seed0 --prepared data/MPMAvatar/4DDress/examples/s185_t1 --split split_idx_lower.npz --label 4 --test-take 7 --test-start 11 --output MPMAvatar/output/differentiable_gpu/initial/scores/s185_t1_lower_ad.json
+cd WarpXPBD && python render_mpmavatar_native_grey.py --prepared ../data/MPMAvatar/4DDress/examples/s185_t1 --source test --labels 4 --rollout "Initial D/E/H" ../MPMAvatar/output/differentiable_gpu/185_lower/s185_t1_lower_initial/seed0 --rollout "FD best" ../data/MPMAvatar/4DDress/examples/s185_t1/output/phys/s185_t1_lower/seed0 --rollout "AD best" ../MPMAvatar/output/differentiable_gpu/185_lower/s185_t1_lower/seed0 --output ../MPMAvatar/output/differentiable_gpu/185_lower/grey_comparison.mp4 --slowdown 8 --panel 480 640   # env warp_xpbd_render
+```
+
+Native FD remains
+the default comparison mode. Start AD in a fresh output directory: its saved
+optimizer context cannot resume an FD optimizer. Native direct training accepts
+`--material_gradient ad`; the dataset launcher uses the hyphenated option below.
+Activate `mpmavatar`, then reuse a trained appearance:
+
+```sh
+python run.py --data ../data/MPMAvatar/ClothTransformer/sim_00000 --output output/ClothTransformer/sim_00000_ad --appearance-model output/ClothTransformer/sim_00000/appearance --stage material --material-gradient ad --material-iterations 200 --material-frames all --grid-size 200 --substeps 400
+```
+
+2026-10-09: [185 upper/lower sensitivity sweep](configs/material_sensitivity_185.json)
+completed and audited. The native training windows are upper 19–30 and
+lower 45–56, Take1. Soft/default/stiff D/E/H = 1/10/1, 1/100/1, 1/1000/1.
+There are 270 native rollouts (five offsets × three absolute steps × three
+D/E/H directions × three centers × two garments), and six center-only AD
+evaluations of the training geometry MSE. Exports include all world-space
+trajectories, per-vertex Euclidean differences from each stencil's center,
+per-frame CSVs, loss FDs and trajectory FDs at h/2h/five-point, and AD errors.
+E derivatives are in exported units; float32 rounding is exposed in the CSVs.
+Independent garment/parameter cases save AD once and checkpoint each stencil;
+`--resume` reuses those completed results across allocations.
+[Results](output/material_sensitivity_185/summary.csv): all 270 trajectories,
+54 FD stencils and 3,240 frame comparisons are saved. Five centers have finite
+AD; lower/soft returns NaN for D/E/H, explicitly marked `ad_status=nonfinite`.
+Its largest vertex difference from the stencil center is 1.51 m (maximum mean
+76.0 mm). Float32 collapses 24 nonzero perturbations to their center, and eight
+stencils have fewer than five distinct effective values.
+[Preparation and run commands](../README.md#mpmavatar-material-sensitivity).
+
 ## Prepared dataset input
 
 Activate the existing `mpmavatar` environment. `run.py` accepts completed

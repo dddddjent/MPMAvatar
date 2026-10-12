@@ -1,5 +1,7 @@
 import argparse
+import json
 import shutil
+import time
 import os
 import sys
 import subprocess
@@ -19,7 +21,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from accelerate import Accelerator, DistributedDataParallelKwargs
 
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import GroupParams, ModelParams, PipelineParams, OptimizationParams
 from scene import Scene, MeshGaussianModel
 from gaussian_renderer import render
 from utils.general_utils import read_obj, read_ply
@@ -38,6 +40,7 @@ from warp_mpm.mpm_data_structure import (
     MPMModelStruct,
 )
 from warp_mpm.mpm_solver import MPMWARP
+from warp_mpm.differentiable import DifferentiableMPM, FrameInputs
 from warp_mpm.initial_state import estimate_velocity, particle_velocities
 from future_evaluation import simulate_future, load_driving_surface, score_evaluation
 
@@ -193,16 +196,23 @@ class Trainer:
             'H': self.best_params["H"],
         }
 
+        material_ad = args.material_gradient == "ad" and not (run_eval or args.body_shape or args.joint_shape)
         self.torch_param = {
-            'D': torch.tensor(float(param['D']), requires_grad=False),
-            'E': torch.tensor(float(param['E']), requires_grad=False),
-            'H': torch.tensor(float(param['H']), requires_grad=False),
+            'D': torch.tensor(float(param['D']), requires_grad=material_ad),
+            'E': torch.tensor(float(param['E']), requires_grad=material_ad),
+            'H': torch.tensor(float(param['H']), requires_grad=material_ad),
         }
 
         self.mesh_friction_coeff = args.mesh_friction_coeff
         self.friction_angle = args.friction_angle
         
         self.setup_simulation(grid_size=args.grid_size)
+        if material_ad:
+            assert accelerator.num_processes == 1, "Checkpointed material fitting currently requires one process"
+            self.differentiable_solver = DifferentiableMPM(
+                self.mpm_solver, self.mpm_model, self.mpm_state,
+                self.vertices_init_position, args.substep,
+            )
         
         self.optimizer = torch.optim.Adam([{"params": [self.torch_param['D']], "lr": opt.lr_D}, {"params": [self.torch_param['E']], "lr": opt.lr_E}, {"params": [self.torch_param['H']], "lr": opt.lr_H}], lr=opt.lr)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, float(self.iterations*0.5*np.pi/np.arccos(0.4)), eta_min=0.0)
@@ -224,6 +234,8 @@ class Trainer:
             "nu": self.init_nu, "gamma": self.init_gamma, "kappa": self.init_kappa,
             "mesh_friction_coeff": self.mesh_friction_coeff, "friction_angle": self.friction_angle,
         }
+        if material_ad:
+            self.resume_context["material_gradient"] = "checkpointed_ad"
         if args.checkpoint_material:
             assert not run_eval and args.dataset_type == "4ddress"
             assert not args.prescribed_surface_path and not args.raw_collider_path
@@ -599,13 +611,14 @@ class Trainer:
             mpm_solver,
         )
 
+        # The native solver receives values; AD material fitting differentiates its own copy.
         density = (
             torch.ones_like(self.particle_init_position[..., 0])
-            * self.torch_param['D']
+            * self.torch_param['D'].detach()
         )
         youngs_modulus = (
             torch.ones_like(self.particle_init_position[..., 0])
-            * self.torch_param['E'] * 100
+            * self.torch_param['E'].detach() * 100
         )
 
         poisson_ratio = torch.ones_like(self.particle_init_position[..., 0]) * self.init_nu
@@ -696,6 +709,178 @@ class Trainer:
 
         return density, youngs_modulus, ret_poisson, ret_gamma, ret_kappa
 
+    @torch.no_grad()
+    def _native_material_loss(self, device: str, offset: tuple[float, float, float],
+                              capture_video: bool) -> tuple[float, np.ndarray | None]:
+        """Native forward geometry loss at the current parameters plus (dD, dE_internal, dH)."""
+        delta_time = 1.0 / 25
+        substep_size = delta_time / self.args.substep
+        num_substeps = int(delta_time / substep_size)
+        dD, dE, dH = offset
+        sim_video = None
+        self.mpm_solver.time = 0.0
+        self.mpm_solver.time_profile.clear()
+        particle_pos = self.particle_init_position.clone()
+        particle_d = self.particle_init_dir.clone()
+        particle_velo = self.particle_init_velo.clone()
+        particle_R_inv = self.compute_rest_dir_inv_from_vf(torch.stack([self.vertices_init_position[:, 0], self.vertices_init_position[:, 1] * (self.torch_param['H'] + dH), self.vertices_init_position[:, 2]], 1), self.new_cloth_faces)
+
+        self.mpm_state.reset_state(
+            self.n_vertices,
+            particle_pos.clone(),
+            particle_d.clone(),
+            None,
+            particle_velo.clone(),
+            tensor_R_inv=particle_R_inv.clone(),
+            device=device,
+            requires_grad=True,
+        )
+        self.mpm_state.set_require_grad(True)
+
+        density, youngs_modulus, poisson, gamma, kappa = self.get_material_params(device)
+        
+        self.mpm_state.reset_density(
+        density + dD, None, device, update_mass=True
+        )
+        
+        self.mpm_solver.set_E_nu_from_torch(
+            self.mpm_model, youngs_modulus + dE * 100, poisson.clone(), gamma.clone(), kappa.clone(), device
+        )
+        self.mpm_solver.prepare_mu_lam(self.mpm_model, self.mpm_state, device)
+        
+        geo_loss = 0
+        if capture_video:
+            sim_video = [self.gt_video[0]]
+        for i in tqdm(range(self.scene.train_frame_num - 1), desc=f"Step {self.step}"):
+            mesh_x = self.wld2sim(self.train_frame_collider[i].clone())
+            mesh_v = self.train_frame_collider_velo[i].clone() * self.scale
+            joint_verts_v = self.train_frame_verts_velo[i, self.joint_v_idx].clone() * self.scale
+            joint_faces_v = joint_verts_v[self.new_cloth_faces[:self.num_joint_f]].mean(1).clone()
+
+            for substep_local in range(num_substeps):
+                mesh_x_curr = mesh_x + substep_size * substep_local * mesh_v
+                self.mpm_solver.p2g2p(
+                    self.mpm_model, self.mpm_state, substep_size, mesh_x=mesh_x_curr, mesh_v=mesh_v, joint_traditional_v=None, joint_verts_v=joint_verts_v, joint_faces_v=joint_faces_v, device=device
+                )
+
+            particle_pos = wp.to_torch(self.mpm_state.particle_x).clone()
+
+            cloth_verts = self.sim2wld(particle_pos[self.n_elements:])
+            geo_loss += F.mse_loss(cloth_verts, self.train_frame_verts[i+1, self.reordered_cloth_v_idx])
+            
+            if capture_video:
+                human_verts = self.train_frame_verts[i+1, self.reordered_human_v_idx]
+                verts = torch.zeros_like(self.first_frame_verts)
+                verts[self.reordered_cloth_v_idx] = cloth_verts
+                verts[self.reordered_human_v_idx] = human_verts
+                img = render_mesh(verts.detach().cpu().numpy(), self.gaussians.faces.cpu().numpy(), self.scene.test_dataset.camera_list[-1])
+                sim_video.append(img)
+        
+        if capture_video:
+            sim_video = np.stack(sim_video, 0)
+            if self.best_video is None:
+                self.best_video = sim_video
+        
+        geo_loss /= (self.scene.train_frame_num - 1)
+        return geo_loss.item(), sim_video
+
+    def _finite_difference_material(self, device: str) -> tuple[float, dict[str, float], np.ndarray | None]:
+        capture_video = self.visualize and (self.step % self.video_iters == 0 or self.step == self.iterations - 1)
+        geo_losses = []
+        for offset in [(0., 0., 0.), (0.05, 0., 0.), (0., 0.05, 0.), (0., 0., 0.005)]:
+            value, video = self._native_material_loss(device, offset, capture_video and offset == (0., 0., 0.))
+            geo_losses.append(value)
+            if offset == (0., 0., 0.):
+                sim_video = video
+
+        gradients = {}
+        gradients['D'] = (geo_losses[1] - geo_losses[0]) / 0.05
+        gradients['E'] = (geo_losses[2] - geo_losses[0]) / 0.05
+        gradients['H'] = (geo_losses[3] - geo_losses[0]) / 0.005
+
+        return geo_losses[0], gradients, sim_video
+
+    def _autodiff_material(self, device: str) -> tuple[torch.Tensor, np.ndarray | None]:
+        parameters = torch.stack([self.torch_param[key] for key in ("D", "E", "H")]).to(device)
+        state = (self.particle_init_position.detach(), self.particle_init_velo.detach(),
+                 torch.zeros_like(wp.to_torch(self.mpm_state.particle_C)), self.particle_init_dir.detach())
+        capture_video = self.visualize and (self.step % self.video_iters == 0 or self.step == self.iterations - 1)
+        if capture_video:
+            sim_video = [self.gt_video[0]]
+        geo_loss = torch.zeros((), device=device)
+        for i in tqdm(range(self.scene.train_frame_num - 1), desc=f"Step {self.step}"):
+            joint_verts_v = self.train_frame_verts_velo[i, self.joint_v_idx].detach().clone() * self.scale
+            frame = FrameInputs(
+                self.wld2sim(self.train_frame_collider[i].detach().clone()),
+                self.train_frame_collider_velo[i].detach().clone() * self.scale,
+                joint_verts_v, joint_verts_v[self.new_cloth_faces[:self.num_joint_f]].mean(1).clone(),
+            )
+            state = self.differentiable_solver.frame(state, parameters, frame)
+            cloth_verts = self.sim2wld(state[0][self.n_elements:])
+            geo_loss = geo_loss + F.mse_loss(cloth_verts, self.train_frame_verts[i+1, self.reordered_cloth_v_idx])
+            if capture_video:
+                verts = torch.zeros_like(self.first_frame_verts)
+                verts[self.reordered_cloth_v_idx] = cloth_verts.detach()
+                verts[self.reordered_human_v_idx] = self.train_frame_verts[i+1, self.reordered_human_v_idx]
+                sim_video.append(render_mesh(verts.cpu().numpy(), self.gaussians.faces.cpu().numpy(),
+                                             self.scene.test_dataset.camera_list[-1]))
+        geo_loss = geo_loss / (self.scene.train_frame_num - 1)
+        if capture_video:
+            sim_video = np.stack(sim_video, 0)
+            if self.best_video is None:
+                self.best_video = sim_video
+        return geo_loss, sim_video if capture_video else None
+
+    def check_material_gradient(self, report: Path, epsilons: list[float]) -> None:
+        """Compare checkpointed AD with central FD of the native forward at the initial parameters."""
+        device = "cuda:{}".format(self.accelerator.process_index)
+        self.differentiable_solver.verify_replay = True
+        names = ("D", "E", "H")
+        values = [float(self.torch_param[key]) for key in names]
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        ad_loss, _ = self._autodiff_material(device)
+        torch.cuda.synchronize()
+        forward_seconds = time.perf_counter() - start
+        ad_loss.backward()
+        torch.cuda.synchronize()
+        backward_seconds = time.perf_counter() - start - forward_seconds
+        ad = [float(self.torch_param[key].grad) for key in names]
+        start = time.perf_counter()
+        native_loss, _ = self._native_material_loss(device, (0., 0., 0.), False)
+        torch.cuda.synchronize()
+        native_seconds = time.perf_counter() - start
+        # CUDA atomics make repeated native forwards differ; this bounds FD resolution.
+        native_repeat = self._native_material_loss(device, (0., 0., 0.), False)[0]
+        rows = []
+        for index, name in enumerate(names):
+            sweep = []
+            for epsilon in epsilons:
+                step = epsilon * values[index]
+                losses = []
+                for sign in (-1., 1.):
+                    offset = [0., 0., 0.]
+                    offset[index] = sign * step
+                    losses.append(self._native_material_loss(device, tuple(offset), False)[0])
+                fd = (losses[1] - losses[0]) / (2. * step)
+                sweep.append({"relative_epsilon": epsilon, "fd": fd,
+                              "relative_error": abs(fd - ad[index]) / max(abs(fd), abs(ad[index]), 1e-30)})
+                print(json.dumps({"parameter": name, "ad": ad[index], **sweep[-1]}), flush=True)
+            rows.append({"parameter": name, "value": values[index], "ad": ad[index], "fd_sweep": sweep})
+        result = {"device": torch.cuda.get_device_name(device), "frames": self.scene.train_frame_num,
+                  "substeps": self.args.substep, "grid_size": self.args.grid_size,
+                  "ad_loss": float(ad_loss), "native_loss": native_loss,
+                  "loss_relative_difference": abs(float(ad_loss) - native_loss) / native_loss,
+                  "native_repeat_loss_difference": abs(native_repeat - native_loss),
+                  "replay_max_errors": self.differentiable_solver.replay_errors,
+                  "replay_max_relative_errors": self.differentiable_solver.replay_relative_errors,
+                  "seconds": {"ad_forward": forward_seconds, "ad_backward": backward_seconds,
+                              "native_forward": native_seconds},
+                  "gradients": rows}
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result, indent=2), flush=True)
+
     def train_one_step(self) -> None:
         accelerator = self.accelerator
         device = "cuda:{}".format(accelerator.process_index)
@@ -703,105 +888,30 @@ class Trainer:
         log_loss_dict = {}
         wandb_dict = {}
 
-        delta_time = 1.0 / 25
-        substep_size = delta_time / self.args.substep
-        num_substeps = int(delta_time / substep_size)
-
-        geo_losses = []
         evaluated = {f"evaluated_{key}": value.item() * (100.0 if key == "E" else 1.0)
                      for key, value in self.torch_param.items()}
-        for (dD, dE, dH) in [(0., 0., 0.), (0.05, 0., 0.), (0., 0.05, 0.), (0., 0., 0.005)]:
-            self.mpm_solver.time = 0.0
-            self.mpm_solver.time_profile.clear()
-            particle_pos = self.particle_init_position.clone()
-            particle_d = self.particle_init_dir.clone()
-            particle_velo = self.particle_init_velo.clone()
-            particle_R_inv = self.compute_rest_dir_inv_from_vf(torch.stack([self.vertices_init_position[:, 0], self.vertices_init_position[:, 1] * (self.torch_param['H'] + dH), self.vertices_init_position[:, 2]], 1), self.new_cloth_faces)
-
-            self.mpm_state.reset_state(
-                self.n_vertices,
-                particle_pos.clone(),
-                particle_d.clone(),
-                None,
-                particle_velo.clone(),
-                tensor_R_inv=particle_R_inv.clone(),
-                device=device,
-                requires_grad=True,
-            )
-            self.mpm_state.set_require_grad(True)
-
-            density, youngs_modulus, poisson, gamma, kappa = self.get_material_params(device)
-            
-            self.mpm_state.reset_density(
-            density + dD, None, device, update_mass=True
-            )
-            
-            self.mpm_solver.set_E_nu_from_torch(
-                self.mpm_model, youngs_modulus + dE * 100, poisson.clone(), gamma.clone(), kappa.clone(), device
-            )
-            self.mpm_solver.prepare_mu_lam(self.mpm_model, self.mpm_state, device)
-            
-            geo_loss = 0
-            if self.visualize and dD == 0 and dE == 0 and dH == 0:
-                if self.step % self.video_iters == 0 or self.step == self.iterations - 1:
-                    sim_video = [self.gt_video[0]]
-            for i in tqdm(range(self.scene.train_frame_num - 1), desc=f"Step {self.step}"):
-                mesh_x = self.wld2sim(self.train_frame_collider[i].clone())
-                mesh_v = self.train_frame_collider_velo[i].clone() * self.scale
-                joint_verts_v = self.train_frame_verts_velo[i, self.joint_v_idx].clone() * self.scale
-                joint_faces_v = joint_verts_v[self.new_cloth_faces[:self.num_joint_f]].mean(1).clone()
-
-                for substep_local in range(num_substeps):
-                    mesh_x_curr = mesh_x + substep_size * substep_local * mesh_v
-                    self.mpm_solver.p2g2p(
-                        self.mpm_model, self.mpm_state, substep_size, mesh_x=mesh_x_curr, mesh_v=mesh_v, joint_traditional_v=None, joint_verts_v=joint_verts_v, joint_faces_v=joint_faces_v, device=device
-                    )
-
-                particle_pos = wp.to_torch(self.mpm_state.particle_x).clone()
-
-                cloth_verts = self.sim2wld(particle_pos[self.n_elements:])
-                geo_loss += F.mse_loss(cloth_verts, self.train_frame_verts[i+1, self.reordered_cloth_v_idx])
-                
-                if self.visualize and dD == 0 and dE == 0 and dH == 0:
-                    if self.step % self.video_iters == 0 or self.step == self.iterations - 1:
-                        human_verts = self.train_frame_verts[i+1, self.reordered_human_v_idx]
-                        verts = torch.zeros_like(self.first_frame_verts)
-                        verts[self.reordered_cloth_v_idx] = cloth_verts
-                        verts[self.reordered_human_v_idx] = human_verts
-                        img = render_mesh(verts.detach().cpu().numpy(), self.gaussians.faces.cpu().numpy(), self.scene.test_dataset.camera_list[-1])
-                        sim_video.append(img)
-            
-            if self.visualize and dD == 0 and dE == 0 and dH == 0:
-                if self.step % self.video_iters == 0 or self.step == self.iterations - 1:
-                    sim_video = np.stack(sim_video, 0)
-                    if self.best_video is None:
-                        self.best_video = sim_video
-            
-            geo_loss /= (self.scene.train_frame_num - 1)
-            
-            geo_losses.append(geo_loss.item())
-
-        gradients = {}
-        gradients['D'] = (geo_losses[1] - geo_losses[0]) / 0.05
-        gradients['E'] = (geo_losses[2] - geo_losses[0]) / 0.05
-        gradients['H'] = (geo_losses[3] - geo_losses[0]) / 0.005
-
+        capture_video = self.visualize and (self.step % self.video_iters == 0 or self.step == self.iterations - 1)
         self.optimizer.zero_grad()
-        self.torch_param['D'].grad = torch.tensor(gradients['D']).float()
-        self.torch_param['E'].grad = torch.tensor(gradients['E']).float()
-        self.torch_param['H'].grad = torch.tensor(gradients['H']).float()
-
+        if self.args.material_gradient == "ad":
+            geo_loss, sim_video = self._autodiff_material(device)
+            geo_loss.backward()
+            loss_value = geo_loss.item()
+        else:
+            value, gradients, sim_video = self._finite_difference_material(device)
+            loss_value = value
+            for key, gradient in gradients.items():
+                self.torch_param[key].grad = torch.tensor(gradient, dtype=torch.float32)
+        for key, parameter in self.torch_param.items():
+            assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), f"Nonfinite {key} gradient"
+            log_loss_dict[f"gradient_{key}"] = parameter.grad.item()
         self.optimizer.step()
         self.scheduler.step()
 
-        self.torch_param['D'].clamp_(min=float(self.param_ranges['D'][0]),
-                                     max=float(self.param_ranges['D'][-1]))
-        self.torch_param['E'].clamp_(min=float(self.param_ranges['E'][0]),
-                                     max=float(self.param_ranges['E'][-1]))
-        self.torch_param['H'].clamp_(min=float(self.param_ranges['H'][0]),
-                                     max=float(self.param_ranges['H'][-1]))
+        with torch.no_grad():
+            for key, parameter in self.torch_param.items():
+                parameter.clamp_(min=float(self.param_ranges[key][0]), max=float(self.param_ranges[key][-1]))
                 
-        log_loss_dict["loss"] = geo_losses[0]
+        log_loss_dict["loss"] = loss_value
         print(
             "D:",
             self.torch_param['D'].item(),
@@ -810,7 +920,7 @@ class Trainer:
             "H:",
             self.torch_param['H'].item(),
             "loss:",
-            geo_losses[0],
+            log_loss_dict["loss"],
         )
 
         if accelerator.is_main_process:
@@ -831,7 +941,7 @@ class Trainer:
 
                 if log_loss_dict["loss"] < self.best_params["loss"]:
                     self.best_params = {k: v for k, v in self.last_params.items()}
-                    if self.visualize:
+                    if capture_video:
                         self.best_video = sim_video
 
                 wandb_dict.update(log_loss_dict)
@@ -1108,12 +1218,18 @@ class Trainer:
         
         return
 
-def parse_args():
+def parse_args() -> tuple[GroupParams, GroupParams, GroupParams, bool, bool, bool, bool]:
     parser = argparse.ArgumentParser()
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument("--run_eval", action="store_true", default=False)
+    parser.add_argument("--material_gradient", choices=("fd", "ad"), default="fd",
+                        help="Experimental checkpointed AD, or native finite differences for comparison")
+    parser.add_argument("--material_gradient_check", type=str, default="",
+                        help="With --material_gradient ad: write an AD vs native central-FD report (JSON) instead of fitting")
+    parser.add_argument("--gradient_check_epsilon", type=float, nargs="+", default=[0.01, 0.003, 0.001],
+                        help="Relative central-FD steps for --material_gradient_check")
     parser.add_argument("--checkpoint_eval", action="store_true",
                         help="Preserve native 4D-DRESS held-out simulation at frame boundaries")
     parser.add_argument("--checkpoint_material", action="store_true",
@@ -1153,6 +1269,11 @@ def parse_args():
 
     model_args = lp.extract(args)
     model_args.smplx_num_betas = args.smplx_num_betas
+    model_args.material_gradient = args.material_gradient
+    model_args.material_gradient_check = args.material_gradient_check
+    model_args.gradient_check_epsilon = args.gradient_check_epsilon
+    assert not args.material_gradient_check or args.material_gradient == "ad", "--material_gradient_check needs --material_gradient ad"
+    assert args.material_gradient == "fd" or not (args.run_eval or args.body_shape or args.joint_shape), "AD currently supports material fitting only"
     model_args.prescribed_surface_path = args.prescribed_surface_path
     model_args.raw_collider_path = args.raw_collider_path
     model_args.body_shape = args.body_shape
@@ -1211,5 +1332,7 @@ if __name__ == "__main__":
             render_body(body.parent / "beta_history.csv", evaluation / "body_fit_curves.png",
                         beta_index, body_step)
         trainer.eval(skip_sim, skip_render, skip_video)
+    elif args.material_gradient_check:
+        trainer.check_material_gradient(Path(args.material_gradient_check), args.gradient_check_epsilon)
     else:
         trainer.train()

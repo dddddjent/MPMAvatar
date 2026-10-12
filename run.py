@@ -17,6 +17,7 @@ from dataset_input import common_arguments, load_manifest
 # Save an early fitting stop without changing its schedule: --material-iterations 60 --stop-after 8 (material), or --body-iterations 60 --stop-after 8 (body/joint).
 # Optimized-body evaluation: --stage evaluate --checkpoint /path/to/material.npz --body-checkpoint /path/to/best_body_shape.npz --render-appearance gt_lighting
 # Evaluation-only optional flags: --checkpoint /path/to/material.npz --evaluate-from-start --skip-render --skip-video.
+# Experimental material AD: --stage material --material-gradient ad (use a fresh output directory).
 # Reuse appearance: --appearance-model /path/to/baseline/appearance (material/evaluate only).
 # Fixed-beta evaluation: --render-appearance gt_lighting.
 
@@ -30,6 +31,8 @@ def main() -> None:
     parser.add_argument("--appearance-model", type=Path,
                         help="Existing appearance directory to reuse for material/body/joint/evaluate; default: <output>/appearance")
     parser.add_argument("--material-iterations", type=int, default=200)
+    parser.add_argument("--material-gradient", choices=("fd", "ad"), default="fd",
+                        help="Experimental checkpointed AD; fd retains native finite differences for comparison")
     parser.add_argument("--material-frames", default="all", help="all (the manifest's complete training prefix), or a count from 2 to its length")
     parser.add_argument("--grid-size", type=int, default=200)
     parser.add_argument("--substeps", type=int, default=400)
@@ -52,6 +55,7 @@ def main() -> None:
     parser.add_argument("--resume-parameters", action="store_true",
                         help="One-time material resume from old NPZ files, resetting Adam and the LR schedule")
     args = parser.parse_args()
+    assert args.material_gradient == "fd" or args.stage == "material", "--material-gradient ad is only supported for material fitting"
     planned_iterations = args.body_iterations if args.stage in ("body", "joint") else args.material_iterations
     assert 0 <= args.stop_after <= planned_iterations, "--stop-after must be between 0 and the planned iteration target"
     assert args.stage in ("material", "body", "joint") or args.stop_after == 0, "--stop-after is only supported for material/body/joint fitting"
@@ -116,6 +120,8 @@ def main() -> None:
                    "--smplx_num_betas", "10",
                    "--prescribed_surface_path", str(root / manifest["prescribed_surface"]),
                    "--grid_size", str(args.grid_size), "--substep", str(args.substeps)]
+        if args.stage == "material":
+            command += ["--material_gradient", args.material_gradient]
         if args.stage in ("material", "body", "joint"):
             command += ["--stop_after", str(args.stop_after)]
         if manifest.get("body_model", "smplx") == "raw":

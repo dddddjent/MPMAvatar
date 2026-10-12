@@ -99,9 +99,19 @@ def inverse_lower_triangle(
     return invdet * wp.mat33(M22*M33, 0.0, 0.0, -M21*M33, M11*M33, 0.0, M21*M32-M31*M22, -M11*M32, M11*M22)
 
 @wp.func
+def in_plane_rotation(f11: float, f12: float, f22: float) -> wp.mat22:
+    # Positive diagonal QR factors give det(F2) > 0. This is the exact 2D
+    # polar rotation U*V^T, including equal stretches at the undeformed state.
+    # Differentiating the separate SVD vectors is singular at equal stretches.
+    trace = f11 + f22
+    length = wp.sqrt(trace * trace + f12 * f12)
+    return wp.mat22(trace / length, f12 / length, -f12 / length, trace / length)
+
+
+@wp.func
 def kirchoff_stress_Anisotropy(
     R_inv: wp.vec3, d: wp.mat33, face: wp.vec3, vol: float, state: MPMStateStruct, mu: float, lam: float, gamma: float, kappa: float
-):
+) -> wp.mat33:
     iD11 = R_inv[0]
     iD12 = R_inv[1]
     iD22 = R_inv[2]
@@ -130,15 +140,7 @@ def kirchoff_stress_Anisotropy(
     RiDT = wp.mat33(F11, 0.0, 0.0, F12, F22, 0.0, R[0,2], R[1,2], R[2,2])
     iFTJ = wp.mat22(F22, 0.0, -F12, F11)
 
-    U3 = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    V3 = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-    sig3 = wp.vec3(0.0)
-    F3 = wp.mat33(F11, F12, 0.0, 0.0, F22, 0.0, 0.0, 0.0, 0.0)
-    wp.svd3(F3, U3, sig3, V3)
-    U = wp.mat22(U3[0,0], U3[0,1], U3[1,0], U3[1,1])
-    V = wp.mat22(V3[0,0], V3[0,1], V3[1,0], V3[1,1])
-
-    Rot = U * wp.transpose(V)
+    Rot = in_plane_rotation(F11, F12, F22)
     J = F11 * F22
 
     K2 = 2.0 * mu * (F2 - Rot) + lam * (J - 1.0) * iFTJ

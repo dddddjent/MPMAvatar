@@ -95,6 +95,17 @@ class LauncherTests(unittest.TestCase):
                 self.assertIn("--skip_render", command)
                 self.assertIn("--skip_video", command)
 
+    def test_checkpointed_material_ad_is_explicit_and_material_only(self) -> None:
+        self.checkpoint("appearance/point_cloud/timestep_030000/point_cloud.ply")
+        command = self.launch("material")
+        self.assertEqual(command[command.index("--material_gradient") + 1], "fd")
+        command = self.launch("material", "--material-gradient", "ad", "--substeps", "400")
+        self.assertEqual(command[command.index("--material_gradient") + 1], "ad")
+        self.assertEqual(command[command.index("--substep") + 1], "400")
+        for stage in ("appearance", "evaluate", "body", "joint"):
+            with self.subTest(stage=stage), self.assertRaisesRegex(AssertionError, "only supported for material fitting"):
+                self.launch(stage, "--material-gradient", "ad")
+
     def test_evaluation_from_start_keeps_fitting_window(self) -> None:
         self.checkpoint("appearance/point_cloud/timestep_030000/point_cloud.ply")
         self.checkpoint("material/seed0/last_param_00003.npz")
