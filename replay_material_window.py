@@ -46,7 +46,7 @@ def replay(trainer: "Trainer") -> tuple[np.ndarray, float]:
     dt = 1.0 / (25.0 * substeps)
     start = trainer.n_elements + trainer.n_traditional
     frames = [trainer.sim2wld(trainer.particle_init_position[start:].to(device))]
-    loss = torch.zeros((), device=device)
+    loss = torch.zeros((), device=device, dtype=trainer.particle_init_position.dtype)
     for frame in range(trainer.scene.train_frame_num - 1):
         mesh_x = trainer.wld2sim(trainer.train_frame_collider[frame])
         mesh_v = trainer.train_frame_collider_velo[frame] * trainer.scale
@@ -78,9 +78,10 @@ def main() -> None:
     assert not run_eval and not args.checkpoint_material and not args.resume and not args.init_params_path
     trainer = Trainer(args, opt, pipe, run_eval)
     selected = dict(np.load(replay_args.params, allow_pickle=False))
-    trainer.torch_param["D"] = torch.tensor(float(selected["evaluated_D"]))
-    trainer.torch_param["E"] = torch.tensor(float(selected["evaluated_E"]) / 100.0)
-    trainer.torch_param["H"] = torch.tensor(float(selected["evaluated_H"]))
+    dtype = trainer.particle_init_position.dtype
+    trainer.torch_param["D"] = torch.tensor(float(selected["evaluated_D"]), dtype=dtype)
+    trainer.torch_param["E"] = torch.tensor(float(selected["evaluated_E"]) / 100.0, dtype=dtype)
+    trainer.torch_param["H"] = torch.tensor(float(selected["evaluated_H"]), dtype=dtype)
     positions, loss = replay(trainer)
     rest = trainer.vertices_init_position.clone()
     rest[:, 1] *= trainer.torch_param["H"].to(rest.device)

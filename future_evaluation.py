@@ -69,11 +69,12 @@ def _advance_predictions(trainer: "Trainer", start_frame: int, frames: list[int]
     if frames[0] == start_frame:
         predictions.append(initial_vertices.clone())
     for frame in tqdm(range(start_frame, frames[-1]), desc=f"Cloth prediction from frame {start_frame}"):
-        body = trainer.body_motion[frame]
-        body_velocity = trainer.body_motion_velocity[frame] * trainer.scale
+        dtype = trainer.particle_init_position.dtype
+        body = trainer.body_motion[frame].to(dtype=dtype)
+        body_velocity = trainer.body_motion_velocity[frame].to(dtype=dtype) * trainer.scale
         mesh_x = trainer.wld2sim(body)
-        joint_velocity = (trainer.prescribed_joint_positions[frame + 1]
-                          - trainer.prescribed_joint_positions[frame]) * 25.0 * trainer.scale
+        joint_velocity = (trainer.prescribed_joint_positions[frame + 1].to(dtype=dtype)
+                          - trainer.prescribed_joint_positions[frame].to(dtype=dtype)) * 25.0 * trainer.scale
         face_velocity = joint_velocity[trainer.new_cloth_faces[:trainer.num_joint_f].long()].mean(1)
         for substep in range(substeps):
             solver.p2g2p(model, state, dt, mesh_x=mesh_x + dt * substep * body_velocity,
@@ -99,7 +100,7 @@ def evaluation_predictions(trainer: "Trainer", frames: list[int]) -> list[torch.
     assert trainer.n_traditional == 0
     device = str(trainer.particle_init_position.device)
     with np.load(trainer.args.prescribed_surface_path, allow_pickle=False) as data:
-        observed = torch.as_tensor(data["vertices"][frames[:2]], dtype=torch.float32, device=device)
+        observed = torch.as_tensor(data["vertices"][frames[:2]], dtype=trainer.particle_init_position.dtype, device=device)
     assert torch.isfinite(observed).all()
     cloth_ids = trainer.reordered_cloth_v_idx.long()
     faces = trainer.new_cloth_faces.long()

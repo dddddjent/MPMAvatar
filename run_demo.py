@@ -6,6 +6,8 @@ from simulation_runtime import configure_simulation
 if "--deterministic" in sys.argv:
     configure_simulation(True)
 
+from warp_mpm.precision import torch_dtype
+
 import pickle
 import numpy as np
 from tqdm import tqdm
@@ -136,9 +138,9 @@ class Trainer:
 
         self.best_params = {k: v for k, v in np.load(os.path.join(self.scene.dataset_dir, "demo/a1_phys_param.npz")).items()}
         self.torch_param = {
-            'D': torch.tensor(float(self.best_params["D"]), requires_grad=False),
-            'E': torch.tensor(float(self.best_params["E"] / 100.0), requires_grad=False),
-            'H': torch.tensor(float(self.best_params["H"]), requires_grad=False),
+            'D': torch.tensor(float(self.best_params["D"]), dtype=torch_dtype, requires_grad=False),
+            'E': torch.tensor(float(self.best_params["E"] / 100.0), dtype=torch_dtype, requires_grad=False),
+            'H': torch.tensor(float(self.best_params["H"]), dtype=torch_dtype, requires_grad=False),
         }
 
         self.mesh_friction_coeff = args.mesh_friction_coeff
@@ -225,11 +227,18 @@ class Trainer:
 
         device = "cuda:{}".format(self.accelerator.process_index)        
 
+        self.first_frame_verts = self.first_frame_verts.to(dtype=torch_dtype)
+        self.test_frame_verts = self.test_frame_verts.to(dtype=torch_dtype)
+        self.test_frame_smplx = self.test_frame_smplx.to(dtype=torch_dtype)
+        self.test_frame_verts_velo = (self.test_frame_verts[1:] - self.test_frame_verts[:-1]) * 25.0
+        self.test_frame_smplx_velo = (self.test_frame_smplx[1:] - self.test_frame_smplx[:-1]) * 25.0
         verts_whole = self.first_frame_verts.detach()
         verts = verts_whole[self.reordered_cloth_v_idx]
         faces = self.new_cloth_faces
         
         self.init_sand, mpm_traditional_vol = get_sand()
+        self.init_sand = self.init_sand.to(dtype=torch_dtype)
+        mpm_traditional_vol = mpm_traditional_vol.to(dtype=torch_dtype)
 
         min_pos = torch.min(verts, 0)[0]
         max_pos = torch.max(verts, 0)[0]
@@ -237,9 +246,9 @@ class Trainer:
         original_mean_pos = (min_pos + max_pos) / 2.0
         max_diff = (2.2 - original_mean_pos[1])
         self.scale = 1.0 / max_diff
-        self.shift = torch.tensor([[1.0, 1.0, 1.0]]).float().cuda() - original_mean_pos * self.scale
+        self.shift = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch_dtype, device=device) - original_mean_pos * self.scale
 
-        self.wld2sim = lambda p: p * self.scale + self.shift
+        self.wld2sim = lambda p: p.to(dtype=torch_dtype) * self.scale + self.shift
         self.sim2wld = lambda p: (p - self.shift) / self.scale
 
         n_elements = faces.shape[0]
@@ -380,7 +389,7 @@ class Trainer:
         mpm_solver.prepare_mu_lam(mpm_model, mpm_state, device)
 
         mpm_solver.add_surface_collider([0., 0.1, 0.], [0., 1., 0.])
-        mpm_solver.add_mesh_collider(mpm_solver.mesh.id, n_grid=mpm_model.n_grid, friction=self.mesh_friction_coeff)
+        mpm_solver.add_mesh_collider(mpm_solver.mesh, n_grid=mpm_model.n_grid, friction=self.mesh_friction_coeff)
         mpm_solver.add_particle_mover(n_grid=mpm_model.n_grid)
 
     def compute_rest_dir_inv(self, rest_dir):
@@ -425,7 +434,7 @@ class Trainer:
         # Compute Particle Volumes
         area = 0.5 * torch.norm(d1.cross(d2), dim=1)
         element_vol = 0.25 * thickness * area
-        vertex_vol = torch.zeros(vertices.shape[0]).cuda().to(torch.float32)
+        vertex_vol = torch.zeros(vertices.shape[0], device=vertices.device, dtype=vertices.dtype)
         vertex_vol.index_add_(0, faces.reshape(-1), element_vol[:, None].repeat(1, 3).reshape(-1))
 
         return init_dir, rest_dir, element_vol, vertex_vol
@@ -580,7 +589,8 @@ class Trainer:
             chair_model = torch.load(os.path.join(self.scene.dataset_dir, "demo/chair_gs.pt"))
             chair_xyz = chair_model["xyz"]
             chair_color = convert_SH(chair_model["shs"], ref_cam, self.gaussians, chair_model["xyz"])
-            extra_attr, extra_chair, sand_color = get_extra_attr(chair_model, chair_color, self.init_sand)
+            extra_attr, extra_chair, sand_color = get_extra_attr(
+                chair_model, chair_color, self.init_sand.to(dtype=chair_xyz.dtype))
 
             savedir = os.path.join(self.output_path, "video")
             imgdir = os.path.join(savedir, "frames")
@@ -590,6 +600,8 @@ class Trainer:
 
             for i in tqdm(range(self.num_frames), desc="Rendering progress"):
                 cam, verts, xyzs = spherical_cam[i], all_verts[i], all_xyzs[i]
+                verts = verts.to(dtype=self.gaussians.get_features.dtype)
+                xyzs = xyzs.to(dtype=chair_xyz.dtype)
                 self.gaussians.set_mesh_by_verts(verts)
                 shadow_map = self.gaussians.shadow_net(ao_maps[i])["shadow_map"]
                 shadow = F.grid_sample(shadow_map, self.gaussians.uv_coord, mode='bilinear', align_corners=False).squeeze()[..., None][self.gaussians.binding]
@@ -625,6 +637,8 @@ def parse_args():
     pp = PipelineParams(parser)
     parser.add_argument("--deterministic", action="store_true",
                         help="Repeatable Warp simulation on the same GPU architecture")
+    parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp32",
+                        help="Floating-point precision of the simulation")
     parser.add_argument("--skip_sim", action="store_true", default=False)
     parser.add_argument("--skip_render", action="store_true", default=False)
     parser.add_argument("--skip_video", action="store_true", default=False)

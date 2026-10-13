@@ -21,7 +21,7 @@ class EvaluationProtocolTests(unittest.TestCase):
         from train_material_params import Trainer
 
         trainer = Trainer.__new__(Trainer)
-        trainer.args = SimpleNamespace(prescribed_surface_path="surface.npz")
+        trainer.args = SimpleNamespace(prescribed_surface_path="surface.npz", checkpoint_eval=False)
         trainer.scene = SimpleNamespace(dataset_dir="recorded_dataset")
         manifest = {"evaluation_frame_ids": [3, 4, 5]}
         with patch("train_material_params.load_manifest", return_value=manifest), patch(

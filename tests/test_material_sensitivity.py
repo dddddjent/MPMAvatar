@@ -62,6 +62,14 @@ class AlgebraTrainer:
 
 
 class MaterialSensitivityTest(unittest.TestCase):
+    def test_fp64_resolves_all_requested_perturbations(self) -> None:
+        self.config["precision"] = "fp64"
+        rows = plan(self.config)
+        for row in rows:
+            center = effective_parameters(self.config["parameter_sets"][row["parameter_set"]], "fp64")
+            if row["offset"]:
+                self.assertNotEqual(row[f"effective_{row['direction']}"], center[row["direction"]])
+
     def setUp(self) -> None:
         self.config = json.loads((REPO / "configs/material_sensitivity_185.json").read_text())
 

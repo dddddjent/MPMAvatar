@@ -48,6 +48,7 @@ from warp_mpm.mpm_data_structure import (
 from warp_mpm.mpm_solver import MPMWARP
 from warp_mpm.differentiable import DifferentiableMPM, FrameInputs
 from warp_mpm.initial_state import estimate_velocity, particle_velocities
+from warp_mpm.precision import torch_dtype
 from future_evaluation import simulate_future, load_driving_surface, score_evaluation
 
 
@@ -204,9 +205,9 @@ class Trainer:
 
         material_ad = args.material_gradient == "ad" and not (run_eval or args.body_shape or args.joint_shape)
         self.torch_param = {
-            'D': torch.tensor(float(param['D']), requires_grad=material_ad),
-            'E': torch.tensor(float(param['E']), requires_grad=material_ad),
-            'H': torch.tensor(float(param['H']), requires_grad=material_ad),
+            'D': torch.tensor(float(param['D']), dtype=torch_dtype, requires_grad=material_ad),
+            'E': torch.tensor(float(param['E']), dtype=torch_dtype, requires_grad=material_ad),
+            'H': torch.tensor(float(param['H']), dtype=torch_dtype, requires_grad=material_ad),
         }
 
         self.mesh_friction_coeff = args.mesh_friction_coeff
@@ -242,6 +243,8 @@ class Trainer:
         }
         if args.deterministic:
             self.resume_context["warp_deterministic_mode"] = wp.config.deterministic.name
+        if args.precision == "fp64":
+            self.resume_context["simulation_precision"] = args.precision
         if material_ad:
             self.resume_context["material_gradient"] = "checkpointed_ad"
         if args.checkpoint_material:
@@ -502,6 +505,15 @@ class Trainer:
 
         device = "cuda:{}".format(self.accelerator.process_index)        
 
+        for key in ("train_frame_verts", "first_frame_verts", "train_frame_collider",
+                    "test_frame_collider"):
+            setattr(self, key, getattr(self, key).to(dtype=torch_dtype))
+        self.initial_cloth_velocity = estimate_velocity(
+            self.train_frame_verts[:, self.reordered_cloth_v_idx.long()], self.scene.train_frame_index)
+        self.train_frame_verts_velo = (self.train_frame_verts[1:] - self.train_frame_verts[:-1]) * 25.0
+        self.train_frame_collider_velo = (self.train_frame_collider[1:] - self.train_frame_collider[:-1]) * 25.0
+        self.test_frame_collider_velo = (self.test_frame_collider[1:] - self.test_frame_collider[:-1]) * 25.0
+
         verts_whole = self.train_frame_verts[0].detach()
         verts = verts_whole[self.reordered_cloth_v_idx]
         faces = self.new_cloth_faces
@@ -512,11 +524,11 @@ class Trainer:
         original_mean_pos = (min_pos + max_pos) / 2.0
         self.scale = 1.0 / max_diff
         if self.args.prescribed_surface_path:
-            self.scale = torch.tensor(self.export_scale, dtype=torch.float32, device="cuda")
-            original_mean_pos = self.export_center
-        self.shift = torch.tensor([[1.0, 1.0, 1.0]]).float().cuda() - original_mean_pos * self.scale
+            self.scale = torch.tensor(self.export_scale, dtype=torch_dtype, device="cuda")
+            original_mean_pos = self.export_center.to(dtype=torch_dtype)
+        self.shift = torch.tensor([[1.0, 1.0, 1.0]], dtype=torch_dtype, device=device) - original_mean_pos * self.scale
 
-        self.wld2sim = lambda p: p * self.scale + self.shift
+        self.wld2sim = lambda p: p.to(dtype=torch_dtype) * self.scale + self.shift
         self.sim2wld = lambda p: (p - self.shift) / self.scale
 
         n_elements = faces.shape[0]
@@ -650,7 +662,7 @@ class Trainer:
             mpm_model, youngs_modulus.clone(), poisson_ratio.clone(), gamma.clone(), kappa.clone(), device
         )
         mpm_solver.prepare_mu_lam(mpm_model, mpm_state, device)
-        mpm_solver.add_mesh_collider(mpm_solver.mesh.id, n_grid=mpm_model.n_grid, friction=self.mesh_friction_coeff)
+        mpm_solver.add_mesh_collider(mpm_solver.mesh, n_grid=mpm_model.n_grid, friction=self.mesh_friction_coeff)
         mpm_solver.add_particle_mover(n_grid=mpm_model.n_grid)
 
     def compute_rest_dir_inv(self, rest_dir):
@@ -908,7 +920,7 @@ class Trainer:
             value, gradients, sim_video = self._finite_difference_material(device)
             loss_value = value
             for key, gradient in gradients.items():
-                self.torch_param[key].grad = torch.tensor(gradient, dtype=torch.float32)
+                self.torch_param[key].grad = torch.tensor(gradient, dtype=self.torch_param[key].dtype)
         for key, parameter in self.torch_param.items():
             assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), f"Nonfinite {key} gradient"
             log_loss_dict[f"gradient_{key}"] = parameter.grad.item()
@@ -1035,18 +1047,21 @@ class Trainer:
         elif not skip_sim:
             device = "cuda:{}".format(self.accelerator.process_index)
 
+            self.test_frame_verts = self.test_frame_verts.to(dtype=torch_dtype)
+            self.test_frame_verts_velo = (self.test_frame_verts[1:] - self.test_frame_verts[:-1]) * 25.0
+
             density, youngs_modulus, poisson, gamma, kappa = self.get_material_params(device)
 
             init_verts = self.wld2sim(self.test_frame_verts[0, self.reordered_cloth_v_idx].clone())
             init_elts = init_verts[self.new_cloth_faces].mean(1)
-            init_traditionals = torch.zeros(0, 3).float().cuda()
+            init_traditionals = torch.zeros(0, 3, dtype=torch_dtype, device=device)
             init_xyzs = torch.cat([init_elts, init_traditionals, init_verts], 0)
             init_verts_velo = self.test_frame_verts_velo[0, self.reordered_cloth_v_idx].clone() * self.scale
             init_elts_velo = init_verts_velo[self.new_cloth_faces].mean(1)
-            init_traditionals_velo = torch.zeros(0, 3).float().cuda()
+            init_traditionals_velo = torch.zeros(0, 3, dtype=torch_dtype, device=device)
             init_velocity = torch.cat([init_elts_velo, init_traditionals_velo, init_verts_velo], 0)
             particle_d, _, _, _ = self.compute_dir_vol(init_verts, self.new_cloth_faces, thickness=1e-5)
-            particle_C = torch.zeros(init_xyzs.shape[0], 3, 3).to(device=device)
+            particle_C = torch.zeros(init_xyzs.shape[0], 3, 3, dtype=torch_dtype, device=device)
             particle_R_inv = self.compute_rest_dir_inv_from_vf(torch.stack([self.vertices_init_position[:, 0], self.vertices_init_position[:, 1] * self.torch_param['H'], self.vertices_init_position[:, 2]], 1), self.new_cloth_faces)
 
             delta_time = 1.0 / 25
@@ -1201,7 +1216,7 @@ class Trainer:
                 os.makedirs(gtdir, exist_ok=True)
 
                 for i, verts in enumerate(tqdm(all_verts, desc=f"Camera {cam.camera_id} Rendering progress")):
-                    self.gaussians.set_mesh_by_verts(verts)
+                    self.gaussians.set_mesh_by_verts(verts.to(dtype=self.gaussians.get_features.dtype))
                     shadow_map = self.gaussians.shadow_net(ao_maps[i])["shadow_map"]
                     shadow = F.grid_sample(shadow_map, self.gaussians.uv_coord, mode='bilinear', align_corners=False).squeeze()[..., None][self.gaussians.binding]
 
@@ -1234,6 +1249,8 @@ def parse_args() -> tuple[GroupParams, GroupParams, GroupParams, bool, bool, boo
     parser.add_argument("--run_eval", action="store_true", default=False)
     parser.add_argument("--deterministic", action="store_true",
                         help="Repeatable Warp simulation on the same GPU architecture; use a fresh process/output")
+    parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp32",
+                        help="Floating-point precision of the simulation; use a fresh process/output")
     parser.add_argument("--material_gradient", choices=("fd", "ad"), default="fd",
                         help="Experimental checkpointed AD, or native finite differences for comparison")
     parser.add_argument("--material_gradient_check", type=str, default="",
@@ -1279,6 +1296,7 @@ def parse_args() -> tuple[GroupParams, GroupParams, GroupParams, bool, bool, boo
 
     model_args = lp.extract(args)
     model_args.deterministic = args.deterministic
+    model_args.precision = args.precision
     model_args.smplx_num_betas = args.smplx_num_betas
     model_args.material_gradient = args.material_gradient
     model_args.material_gradient_check = args.material_gradient_check

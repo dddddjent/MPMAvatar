@@ -264,6 +264,15 @@ fresh process/output and keep the mode when resuming. Sensitivity campaigns can
 set `"deterministic": true` in their input config before preparation. This flag
 covers simulation; it does not guarantee deterministic appearance rendering.
 
+`--precision fp64` selects double precision for simulation tensors, Warp state,
+materials, grid, body contact and attachments; the default is `fp32`.
+Use it with `run.py` simulation stages, `train_material_params.py`,
+`replay_material_window.py` or `run_demo.py`, in a fresh process/output, and keep
+the precision when resuming. Appearance preparation/rendering keeps its existing
+precision. Sensitivity configs accept `"precision": "fp64"` and report the actual
+material rounding in that precision. Forward timing commands and measurements:
+[workspace README](../README.md#mpmavatar-fp64-forward-timing).
+
 `evaluation/seed0/` contains `evaluation_predictions.npz` for scoring,
 `predictions.npz` and UV meshes for the selected rendering rollout, and
 `geometry_metrics.json`/`.md` (per-frame/mean V2V and XYZ MSE on free cloth,

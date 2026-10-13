@@ -1,7 +1,23 @@
-"""Select repeatable tensor preparation and Warp atomic ordering at startup."""
+"""Select simulation precision and repeatable Warp execution at startup."""
 
 import os
+import argparse
+import sys
 import warp as wp
+
+
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp32")
+simulation_precision = _parser.parse_known_args()[0].precision
+
+
+def configure_precision(precision: str) -> None:
+    """Select precision before importing simulation structs and kernels."""
+    global simulation_precision
+    assert precision in ("fp32", "fp64"), precision
+    assert "warp_mpm.precision" not in sys.modules or simulation_precision == precision, (
+        "Use a fresh process to change simulation precision")
+    simulation_precision = precision
 
 
 def configure_simulation(deterministic: bool) -> None:

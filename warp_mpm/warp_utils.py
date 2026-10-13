@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 import warp as wp
+from warp_mpm.precision import scalar, vec2, vec3, mat22, mat33, torch_dtype
 
 
 def from_torch_safe(
@@ -12,4 +13,6 @@ def from_torch_safe(
     requires_grad: bool | None = None,
     grad: torch.Tensor | wp.array | None = None,
 ) -> wp.array:
+    if dtype in (scalar, vec2, vec3, mat22, mat33):
+        t = t.to(dtype=torch_dtype)
     return wp.from_torch(t, dtype=dtype, requires_grad=requires_grad, grad=grad)

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 import warp as wp
+from warp_mpm.precision import scalar, vec2, vec3, mat22, mat33, torch_dtype
 
 # Template command (activate mpmavatar; run from MPMAvatar):
 # CUDA_VISIBLE_DEVICES='' OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python check_differentiable.py --substeps 1 8 40 400 --frames 2 --heights 0.94 1.0 --epsilon 0.1 0.05 0.03 0.01 0.003 0.001 --rtol 0.03 --atol 0.00000001 --full-tape-check --float64-reference --device cpu --output output/differentiable_cpu/report.json
@@ -22,32 +23,32 @@ DEVICE = "cpu"
 
 @wp.kernel
 def rotation_probe(
-    values: wp.array(dtype=wp.vec3), analytical: wp.array(dtype=wp.mat22),
-    svd: wp.array(dtype=wp.mat22),
+    values: wp.array(dtype=vec3), analytical: wp.array(dtype=mat22),
+    svd: wp.array(dtype=mat22),
 ) -> None:
     p = wp.tid()
     a = values[p]
     analytical[p] = in_plane_rotation(a[0], a[1], a[2])
-    f = wp.mat33(a[0], a[1], 0.0, 0.0, a[2], 0.0, 0.0, 0.0, 0.0)
-    u = wp.mat33(0.0)
-    v = wp.mat33(0.0)
-    sigma = wp.vec3(0.0)
+    f = mat33(a[0], a[1], scalar(0.0), scalar(0.0), a[2], scalar(0.0), scalar(0.0), scalar(0.0), scalar(0.0))
+    u = mat33(scalar(0.0))
+    v = mat33(scalar(0.0))
+    sigma = vec3(scalar(0.0))
     wp.svd3(f, u, sigma, v)
     r = u * wp.transpose(v)
-    svd[p] = wp.mat22(r[0, 0], r[0, 1], r[1, 0], r[1, 1])
+    svd[p] = mat22(r[0, 0], r[0, 1], r[1, 0], r[1, 1])
 
 
 def check_rotation() -> dict[str, object]:
     values = torch.tensor([[1., 0., 1.], [1.3, .2, .7], [.5, -.4, 1.6], [1., 1e-6, 1.], [2., 3., .1]])
-    source = wp.from_torch(values.clone(), dtype=wp.vec3, requires_grad=True)
-    analytical = wp.zeros(len(values), dtype=wp.mat22, device=DEVICE, requires_grad=True)
-    svd = wp.zeros(len(values), dtype=wp.mat22, device=DEVICE)
+    source = wp.from_torch(values.clone(), dtype=vec3, requires_grad=True)
+    analytical = wp.zeros(len(values), dtype=mat22, device=DEVICE, requires_grad=True)
+    svd = wp.zeros(len(values), dtype=mat22, device=DEVICE)
     seed = torch.tensor([[.3, .7], [-.2, .4]]).expand(len(values), -1, -1).contiguous()
     tape = wp.Tape()
     with tape:
         wp.launch(rotation_probe, len(values), inputs=[source, analytical, svd], device=DEVICE)
     forward_error = float((wp.to_torch(analytical).detach() - wp.to_torch(svd)).abs().max())
-    tape.backward(grads={analytical: wp.from_torch(seed, dtype=wp.mat22, requires_grad=False)})
+    tape.backward(grads={analytical: wp.from_torch(seed, dtype=mat22, requires_grad=False)})
     ad = wp.to_torch(source.grad).clone()
     errors = []
     for column in range(3):
@@ -57,7 +58,7 @@ def check_rotation() -> dict[str, object]:
         objectives = []
         for inputs in (minus, plus):
             wp.launch(rotation_probe, len(values),
-                      inputs=[wp.from_torch(inputs, dtype=wp.vec3, requires_grad=False), analytical, svd], device=DEVICE)
+                      inputs=[wp.from_torch(inputs, dtype=vec3, requires_grad=False), analytical, svd], device=DEVICE)
             objectives.append((wp.to_torch(analytical).detach().double() * seed).sum((1, 2)))
         fd = (objectives[1] - objectives[0]) / (plus[:, column].double() - minus[:, column].double())
         errors.append(float((fd - ad[:, column]).abs().max()))
@@ -148,7 +149,7 @@ def check_full_tape() -> dict[str, object]:
     objective = loss(leaves, vertices, True) + sum(value.double().sum() * 0.0 for value in leaves)
     seeds = torch.autograd.grad(objective, leaves)
     tape.backward(grads={getattr(stages[-1].result, key): wp.from_torch(seed.contiguous(), dtype=dtype, requires_grad=False)
-                         for key, dtype, seed in zip(STATE_KEYS, (wp.vec3, wp.vec3, wp.mat33, wp.mat33), seeds)})
+                         for key, dtype, seed in zip(STATE_KEYS, (vec3, vec3, mat33, mat33), seeds)})
     full_gradient = wp.to_torch(shared_parameters.grad).clone()
     error = float((full_gradient - checkpoint_gradient).abs().max())
     result = {"substeps": 800, "checkpointed_ad": checkpoint_gradient.tolist(), "full_tape_ad": full_gradient.tolist(),
@@ -208,7 +209,7 @@ def fixture(contact: bool, attachments: bool, substeps: int, face_attachments: b
                                              "friction_angle": 25.0, "grid_v_damping_scale": 1.1}, device=DEVICE)
     solver.set_E_nu(model, E=80., nu=.3, gamma=500., kappa=500., device=DEVICE)
     if contact:
-        solver.add_mesh_collider(solver.mesh.id, 16, friction=.35, device=DEVICE)
+        solver.add_mesh_collider(solver.mesh, 16, friction=.35, device=DEVICE)
     if attachments:
         solver.add_particle_mover(16, device=DEVICE)
     engine = DifferentiableMPM(solver, model, state, vertices, substeps, frame_dt=substeps * 1e-4, verify_replay=True)
@@ -379,6 +380,7 @@ def main() -> None:
     parser.add_argument("--full-tape-check", action="store_true", help="Compare 800 steps of checkpointed AD with one full CPU tape")
     parser.add_argument("--float64-reference", action="store_true", help="Investigate long-rollout float32 sensitivity with independent float64 cloth equations")
     parser.add_argument("--device", default="cpu", help="cpu or a CUDA device such as cuda:0")
+    parser.add_argument("--precision", choices=("fp32", "fp64"), default="fp32")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     assert args.frames >= 1 and min(args.substeps) >= 1 and min(args.epsilon) > 0
@@ -387,6 +389,7 @@ def main() -> None:
     DEVICE = args.device
     torch.set_num_threads(1)
     torch.set_default_device(DEVICE)
+    torch.set_default_dtype(torch_dtype)
     wp.init()
     wp.set_device(DEVICE)
     rotation = check_rotation()
@@ -396,7 +399,7 @@ def main() -> None:
     face_mover = run_case(True, True, 8, 2, args.epsilon, args.rtol, args.atol, face_attachments=True)
     state_vjp = check_state_vjp()
     yield_surface = check_state_vjp(yield_surface=True)
-    report = {"device": wp.get_device(DEVICE).name if DEVICE != "cpu" else "cpu", "warp": wp.__version__, "rtol": args.rtol, "atol": args.atol,
+    report = {"precision": args.precision, "device": wp.get_device(DEVICE).name if DEVICE != "cpu" else "cpu", "warp": wp.__version__, "rtol": args.rtol, "atol": args.atol,
               "finite_difference": "Native forward solver; central differences with an epsilon sweep",
               "rotation": rotation, "state_vjp": state_vjp, "yield_surface_diagnostic": yield_surface,
               "face_attachment_case": face_mover, "cases": results,

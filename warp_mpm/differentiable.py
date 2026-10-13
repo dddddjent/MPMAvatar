@@ -10,16 +10,17 @@ from typing import Any
 
 import torch
 import warp as wp
+from warp_mpm.precision import scalar, vec2, vec3, mat22, mat33, torch_dtype
 
 from warp_mpm.mpm_solver import (
-    MPMWARP, MPMModelStruct, MPMStateStruct, MPMSmallStateStruct,
+    MPMWARP, MPMModelStruct, MPMStateStruct, MPMSmallStateStruct, SimulationMesh,
     Mesh_collider, Particle_mover, anisotropy_return_mapping,
     kirchoff_stress_Anisotropy, p2g_apic_with_stress,
     grid_normalization_and_gravity, g2p_v_differentiable, g2p_e_differentiable,
 )
 
 STATE_KEYS = ("particle_x", "particle_v", "particle_C", "particle_d")
-STATE_DTYPES = (wp.vec3, wp.vec3, wp.mat33, wp.mat33)
+STATE_DTYPES = (vec3, vec3, mat33, mat33)
 ClothState = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 
 
@@ -33,16 +34,16 @@ class FrameInputs:
 
 @wp.kernel
 def prepare_material(
-    parameters: wp.array(dtype=float), rest_vertices: wp.array(dtype=wp.vec3),
+    parameters: wp.array(dtype=scalar), rest_vertices: wp.array(dtype=vec3),
     state: MPMStateStruct, model: MPMModelStruct, n_elements: int,
 ) -> None:
     p = wp.tid()
     density = parameters[0]
-    youngs = 100.0 * parameters[1]
+    youngs = scalar(100.0) * parameters[1]
     nu = model.nu[p]
     model.E[p] = youngs
-    model.mu[p] = youngs / (2.0 * (1.0 + nu))
-    model.lam[p] = youngs * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    model.mu[p] = youngs / (scalar(2.0) * (scalar(1.0) + nu))
+    model.lam[p] = youngs * nu / ((scalar(1.0) + nu) * (scalar(1.0) - scalar(2.0) * nu))
     state.particle_mass[p] = density * state.particle_vol[p]
     if p < n_elements:
         face = state.faces[p]
@@ -50,12 +51,12 @@ def prepare_material(
         b = rest_vertices[int(face[1])]
         c = rest_vertices[int(face[2])]
         height = parameters[2]
-        e1 = wp.vec3(b[0] - a[0], height * (b[1] - a[1]), b[2] - a[2])
-        e2 = wp.vec3(c[0] - a[0], height * (c[1] - a[1]), c[2] - a[2])
+        e1 = vec3(b[0] - a[0], height * (b[1] - a[1]), b[2] - a[2])
+        e2 = vec3(c[0] - a[0], height * (c[1] - a[1]), c[2] - a[2])
         r11 = wp.length(e1)
         r12 = wp.dot(e1, e2) / r11
         r22 = wp.length(e2 - (r12 / r11) * e1)
-        state.particle_R_inv[p] = wp.vec3(1.0 / r11, -r12 / (r11 * r22), 1.0 / r22)
+        state.particle_R_inv[p] = vec3(scalar(1.0) / r11, -r12 / (r11 * r22), scalar(1.0) / r22)
 
 
 @wp.kernel
@@ -71,18 +72,18 @@ def cloth_stress(current: MPMSmallStateStruct, work: MPMStateStruct, model: MPMM
 
 @wp.kernel
 def body_collision(
-    velocity: wp.array3d(dtype=wp.vec3), result: wp.array3d(dtype=wp.vec3),
+    velocity: wp.array3d(dtype=vec3), result: wp.array3d(dtype=vec3),
     param: Mesh_collider,
 ) -> None:
     i, j, k = wp.tid()
     v = velocity[i, j, k]
-    if param.weight[i, j, k] > 1e-15:
+    if param.weight[i, j, k] > scalar(1e-15):
         relative = v - param.mesh_v_out[i, j, k]
         n = wp.normalize(param.mesh_normal[i, j, k])
         normal = wp.dot(relative, n)
-        projected = relative - wp.min(normal, 0.0) * n
-        if normal < 0.0 and wp.length(projected) > 1e-20:
-            friction = wp.max(0.0, wp.length(projected) + normal * param.friction) * wp.normalize(projected)
+        projected = relative - wp.min(normal, scalar(0.0)) * n
+        if normal < scalar(0.0) and wp.length(projected) > scalar(1e-20):
+            friction = wp.max(scalar(0.0), wp.length(projected) + normal * param.friction) * wp.normalize(projected)
         else:
             friction = projected
         result[i, j, k] = friction + param.mesh_v_out[i, j, k]
@@ -92,11 +93,11 @@ def body_collision(
 
 @wp.kernel
 def attachment_velocity(
-    velocity: wp.array3d(dtype=wp.vec3), result: wp.array3d(dtype=wp.vec3),
+    velocity: wp.array3d(dtype=vec3), result: wp.array3d(dtype=vec3),
     param: Particle_mover,
 ) -> None:
     i, j, k = wp.tid()
-    if param.weight[i, j, k] > 1e-15:
+    if param.weight[i, j, k] > scalar(1e-15):
         result[i, j, k] = param.velocity[i, j, k] / param.weight[i, j, k]
     else:
         result[i, j, k] = velocity[i, j, k]
@@ -104,11 +105,11 @@ def attachment_velocity(
 
 @wp.kernel
 def damp_velocity(
-    velocity: wp.array3d(dtype=wp.vec3), result: wp.array3d(dtype=wp.vec3), scale: float,
+    velocity: wp.array3d(dtype=vec3), result: wp.array3d(dtype=vec3), scale: scalar,
 ) -> None:
     i, j, k = wp.tid()
     v = velocity[i, j, k]
-    result[i, j, k] = v - (1.0 - scale) * v
+    result[i, j, k] = v - (scalar(1.0) - scale) * v
 
 
 class DifferentiableMPM:
@@ -131,13 +132,13 @@ class DifferentiableMPM:
         self.substeps = substeps
         self.dt = frame_dt / substeps
         self.grid = (model.n_grid,) * 3
-        self.parameters = wp.zeros(3, dtype=float, device=self.device, requires_grad=True)
-        self.rest_vertices = wp.from_torch(rest_vertices.detach().contiguous(), dtype=wp.vec3, requires_grad=False)
+        self.parameters = wp.zeros(3, dtype=scalar, device=self.device, requires_grad=True)
+        self.rest_vertices = wp.from_torch(rest_vertices.detach().contiguous(), dtype=vec3, requires_grad=False)
         self.model = MPMModelStruct()
         for key in MPMModelStruct.vars:
             setattr(self.model, key, getattr(model, key))
         for key in ("E", "mu", "lam"):
-            setattr(self.model, key, wp.zeros(solver.n_particles, dtype=float, device=self.device, requires_grad=True))
+            setattr(self.model, key, wp.zeros(solver.n_particles, dtype=scalar, device=self.device, requires_grad=True))
         self.current = MPMSmallStateStruct()
         self.result = MPMSmallStateStruct()
         for small in (self.current, self.result):
@@ -148,16 +149,16 @@ class DifferentiableMPM:
         for key in ("particle_x", "particle_v", "particle_C"):
             setattr(self.work, key, getattr(self.current, key))
         for key, count, dtype in (
-            ("particle_mass", solver.n_particles, float),
-            ("particle_R_inv", solver.n_elements, wp.vec3),
-            ("particle_d", solver.n_elements, wp.mat33),
-            ("particle_stress", solver.n_elements, wp.mat33),
-            ("vertex_force", solver.n_vertices, wp.vec3),
+            ("particle_mass", solver.n_particles, scalar),
+            ("particle_R_inv", solver.n_elements, vec3),
+            ("particle_d", solver.n_elements, mat33),
+            ("particle_stress", solver.n_elements, mat33),
+            ("vertex_force", solver.n_vertices, vec3),
         ):
             setattr(self.work, key, wp.zeros(count, dtype=dtype, device=self.device, requires_grad=True))
-        self.work.grid_m = wp.zeros(self.grid, dtype=float, device=self.device, requires_grad=True)
-        self.work.grid_v_in = wp.zeros(self.grid, dtype=wp.vec3, device=self.device, requires_grad=True)
-        self.velocities = [wp.zeros(self.grid, dtype=wp.vec3, device=self.device, requires_grad=True)
+        self.work.grid_m = wp.zeros(self.grid, dtype=scalar, device=self.device, requires_grad=True)
+        self.work.grid_v_in = wp.zeros(self.grid, dtype=vec3, device=self.device, requires_grad=True)
+        self.velocities = [wp.zeros(self.grid, dtype=vec3, device=self.device, requires_grad=True)
                            for _ in range(1 + int(model.grid_v_damping_scale < 1.0) + len(solver.mesh_colliders)
                                           + int(solver.num_joint_v + solver.num_joint_f > 0))]
         self.work.grid_v_out = self.velocities[0]
@@ -165,22 +166,24 @@ class DifferentiableMPM:
         for key in MPMStateStruct.vars:
             setattr(self.transport, key, getattr(self.work, key))
         self.transport.grid_v_out = self.velocities[-1]
-        self.mesh = wp.Mesh(points=wp.clone(solver.mesh.points), velocities=wp.clone(solver.mesh.velocities),
-                            indices=solver.mesh.indices)
+        self.mesh = SimulationMesh()
+        self.mesh.points = wp.clone(solver.mesh.points)
+        self.mesh.velocities = wp.clone(solver.mesh.velocities)
+        self.mesh.indices = solver.mesh.indices
         self.colliders: list[Mesh_collider] = []
         for native in solver.mesh_collider_params:
             collider = Mesh_collider()
-            assert native.mesh_id == solver.mesh.id, "Collider must use the prescribed body mesh"
-            collider.mesh_id, collider.friction = self.mesh.id, native.friction
-            for key, dtype in (("weight", float), ("mesh_v_in", wp.vec3),
-                               ("mesh_v_out", wp.vec3), ("mesh_normal", wp.vec3)):
+            assert native.mesh.points.ptr == solver.mesh.points.ptr, "Collider must use the prescribed body mesh"
+            collider.mesh, collider.friction = self.mesh, native.friction
+            for key, dtype in (("weight", scalar), ("mesh_v_in", vec3),
+                               ("mesh_v_out", vec3), ("mesh_normal", vec3)):
                 setattr(collider, key, wp.zeros(self.grid, dtype=dtype, device=self.device))
             self.colliders.append(collider)
         self.mover = Particle_mover()
-        self.mover.weight = wp.zeros(self.grid, dtype=float, device=self.device, requires_grad=True)
-        self.mover.velocity = wp.zeros(self.grid, dtype=wp.vec3, device=self.device, requires_grad=True)
-        self.joint_vertices = wp.zeros(solver.num_joint_v, dtype=wp.vec3, device=self.device)
-        self.joint_faces = wp.zeros(solver.num_joint_f, dtype=wp.vec3, device=self.device)
+        self.mover.weight = wp.zeros(self.grid, dtype=scalar, device=self.device, requires_grad=True)
+        self.mover.velocity = wp.zeros(self.grid, dtype=vec3, device=self.device, requires_grad=True)
+        self.joint_vertices = wp.zeros(solver.num_joint_v, dtype=vec3, device=self.device)
+        self.joint_faces = wp.zeros(solver.num_joint_f, dtype=vec3, device=self.device)
         self.verify_replay = verify_replay
         self.replay_error = 0.0
         self.replay_errors = dict.fromkeys(STATE_KEYS, 0.0)
@@ -193,7 +196,7 @@ class DifferentiableMPM:
         return wp.ScopedStream(None)
 
     def load(self, state: ClothState, parameters: torch.Tensor) -> None:
-        assert parameters.shape == (3,) and parameters.dtype == torch.float32
+        assert parameters.shape == (3,) and parameters.dtype == torch_dtype
         for key, dtype, tensor in zip(STATE_KEYS, STATE_DTYPES, state):
             wp.copy(getattr(self.current, key), wp.from_torch(tensor.detach().contiguous(), dtype=dtype, requires_grad=False))
         wp.copy(self.parameters, wp.from_torch(parameters.detach().contiguous(), requires_grad=False))
@@ -204,16 +207,16 @@ class DifferentiableMPM:
     def driving(self, frame: FrameInputs, substep: int) -> None:
         """Prescribed body buffers are regenerated outside the local tape."""
         points = frame.mesh_x + (substep * self.dt) * frame.mesh_v
-        wp.copy(self.mesh.points, wp.from_torch(points.contiguous(), dtype=wp.vec3, requires_grad=False))
-        wp.copy(self.mesh.velocities, wp.from_torch(frame.mesh_v.contiguous(), dtype=wp.vec3, requires_grad=False))
+        wp.copy(self.mesh.points, wp.from_torch(points.contiguous(), dtype=vec3, requires_grad=False))
+        wp.copy(self.mesh.velocities, wp.from_torch(frame.mesh_v.contiguous(), dtype=vec3, requires_grad=False))
         for kernels, collider in zip(self.solver.mesh_colliders, self.colliders):
             wp.launch(kernels[0], self.grid, inputs=[collider], device=self.device)
             wp.launch(kernels[1], self.solver.num_mesh_f, inputs=[collider, self.model], device=self.device)
             wp.launch(kernels[2], self.grid, inputs=[collider], device=self.device)
         if self.solver.num_joint_v:
-            wp.copy(self.joint_vertices, wp.from_torch(frame.joint_verts_v.contiguous(), dtype=wp.vec3, requires_grad=False))
+            wp.copy(self.joint_vertices, wp.from_torch(frame.joint_verts_v.contiguous(), dtype=vec3, requires_grad=False))
         if self.solver.num_joint_f:
-            wp.copy(self.joint_faces, wp.from_torch(frame.joint_faces_v.contiguous(), dtype=wp.vec3, requires_grad=False))
+            wp.copy(self.joint_faces, wp.from_torch(frame.joint_faces_v.contiguous(), dtype=vec3, requires_grad=False))
 
     def clear(self) -> None:
         self.work.grid_m.zero_()

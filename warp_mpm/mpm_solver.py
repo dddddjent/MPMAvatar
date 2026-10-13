@@ -2,6 +2,7 @@ import sys
 import os
 
 import warp as wp
+from warp_mpm.precision import scalar_index, scalar, vec2, vec3, mat22, mat33, torch_dtype
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from mpm_data_structure import *
@@ -43,10 +44,11 @@ class MPMWARP(object):
         self.particle_velocity_modifier_params = []
 
         if mesh_vertices is not None and mesh_faces is not None:
-            points = wp.from_numpy(mesh_vertices, dtype=wp.vec3, device=device, requires_grad=False)
+            points = wp.from_numpy(mesh_vertices, dtype=vec3, device=device, requires_grad=False)
             velocities = wp.zeros_like(points, requires_grad=False)
             indices = wp.from_numpy(mesh_faces.flatten(), dtype=wp.int32, device=device, requires_grad=False)
-            self.mesh = wp.Mesh(points=points, velocities=velocities, indices=indices)
+            self.mesh = SimulationMesh()
+            self.mesh.points, self.mesh.velocities, self.mesh.indices = points, velocities, indices
             self.num_mesh_v = mesh_vertices.shape[0]
             self.num_mesh_f = mesh_faces.shape[0]
 
@@ -94,7 +96,7 @@ class MPMWARP(object):
             mpm_model.alpha = wp.sqrt(2.0 / 3.0) * 2.0 * sin_phi / (3.0 - sin_phi)
 
         if "g" in kwargs:
-            mpm_model.gravitational_accelaration = wp.vec3(
+            mpm_model.gravitational_accelaration = vec3(
                 kwargs["g"][0], kwargs["g"][1], kwargs["g"][2]
             )
 
@@ -198,22 +200,22 @@ class MPMWARP(object):
         if E.ndim == 0:
             E_inp = E.item()  # float
         else:
-            E_inp = from_torch_safe(E, dtype=wp.float32, requires_grad=True)
+            E_inp = from_torch_safe(E, dtype=scalar, requires_grad=True)
 
         if nu.ndim == 0:
             nu_inp = nu.item()  # float
         else:
-            nu_inp = from_torch_safe(nu, dtype=wp.float32, requires_grad=True)
+            nu_inp = from_torch_safe(nu, dtype=scalar, requires_grad=True)
 
         if gamma.ndim == 0:
             gamma_inp = gamma.item()  # float
         else:
-            gamma_inp = from_torch_safe(gamma, dtype=wp.float32, requires_grad=True)
+            gamma_inp = from_torch_safe(gamma, dtype=scalar, requires_grad=True)
 
         if kappa.ndim == 0:
             kappa_inp = kappa.item()  # float
         else:
-            kappa_inp = from_torch_safe(kappa, dtype=wp.float32, requires_grad=True)
+            kappa_inp = from_torch_safe(kappa, dtype=scalar, requires_grad=True)
 
         self.set_E_nu(mpm_model, E_inp, nu_inp, gamma_inp, kappa_inp, device=device)
 
@@ -279,11 +281,11 @@ class MPMWARP(object):
             )
         
         if joint_traditional_v is not None:
-            new_joint_traditional_v = wp.from_numpy(joint_traditional_v.detach().cpu().numpy(), dtype=wp.vec3, device=device)
+            new_joint_traditional_v = wp.from_numpy(joint_traditional_v.detach().cpu().numpy(), dtype=vec3, device=device)
             joint_num = joint_traditional_v.shape[0]
 
         if mesh_x is not None:
-            new_mesh_points = wp.from_numpy(mesh_x.detach().cpu().numpy(), dtype=wp.vec3, device=device)
+            new_mesh_points = wp.from_numpy(mesh_x.detach().cpu().numpy(), dtype=vec3, device=device)
 
             with wp.ScopedTimer(
                 "update_mesh_positions",
@@ -299,7 +301,7 @@ class MPMWARP(object):
                 )
 
         if mesh_v is not None:
-            new_mesh_velocities = wp.from_numpy(mesh_v.detach().cpu().numpy(), dtype=wp.vec3, device=device)
+            new_mesh_velocities = wp.from_numpy(mesh_v.detach().cpu().numpy(), dtype=vec3, device=device)
 
             with wp.ScopedTimer(
                 "update_mesh_velocities",
@@ -419,8 +421,8 @@ class MPMWARP(object):
                 )
         
         if joint_verts_v is not None and joint_faces_v is not None:
-            new_joint_verts_v = wp.from_numpy(joint_verts_v.detach().cpu().numpy(), dtype=wp.vec3, device=device)
-            new_joint_faces_v = wp.from_numpy(joint_faces_v.detach().cpu().numpy(), dtype=wp.vec3, device=device)
+            new_joint_verts_v = wp.from_numpy(joint_verts_v.detach().cpu().numpy(), dtype=vec3, device=device)
+            new_joint_faces_v = wp.from_numpy(joint_faces_v.detach().cpu().numpy(), dtype=vec3, device=device)
             # apply Particle Moving on grid
             with wp.ScopedTimer(
                 "apply_Particle_Moving_on_grid", synchronize=True, print=False, dict=self.time_profile
@@ -542,7 +544,7 @@ class MPMWARP(object):
     
     def export_particle_cov_to_torch(self, mpm_state, device="cuda:0"):
         new_cov = wp.zeros(
-            shape=self.n_no_vertices * 6, dtype=float, device=device, requires_grad=False
+            shape=self.n_no_vertices * 6, dtype=scalar, device=device, requires_grad=False
         )
         with wp.ScopedTimer(
             "compute_cov_from_F",
@@ -579,8 +581,8 @@ class MPMWARP(object):
         collider_param.start_time = start_time
         collider_param.end_time = end_time
 
-        collider_param.point = wp.vec3(point[0], point[1], point[2])
-        collider_param.normal = wp.vec3(normal[0], normal[1], normal[2])
+        collider_param.point = vec3(point[0], point[1], point[2])
+        collider_param.normal = vec3(normal[0], normal[1], normal[2])
 
         if surface == "sticky" and friction != 0:
             raise ValueError("friction must be 0 on sticky surfaces.")
@@ -599,39 +601,39 @@ class MPMWARP(object):
 
         @wp.kernel
         def collide(
-            time: float,
-            dt: float,
+            time: scalar,
+            dt: scalar,
             state: MPMStateStruct,
             model: MPMModelStruct,
             param: Dirichlet_collider,
         ):
             grid_x, grid_y, grid_z = wp.tid()
             if time >= param.start_time and time < param.end_time:
-                offset = wp.vec3(
-                    float(grid_x) * model.dx - param.point[0],
-                    float(grid_y) * model.dx - param.point[1],
-                    float(grid_z) * model.dx - param.point[2],
+                offset = vec3(
+                    scalar_index(grid_x) * model.dx - param.point[0],
+                    scalar_index(grid_y) * model.dx - param.point[1],
+                    scalar_index(grid_z) * model.dx - param.point[2],
                 )
-                n = wp.vec3(param.normal[0], param.normal[1], param.normal[2])
+                n = vec3(param.normal[0], param.normal[1], param.normal[2])
                 dotproduct = wp.dot(offset, n)
 
-                if dotproduct < 0.0:
+                if dotproduct < scalar(0.0):
                     if param.surface_type == 0:
-                        state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
-                            0.0, 0.0, 0.0
+                        state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
+                            scalar(0.0), scalar(0.0), scalar(0.0)
                         )
                     elif param.surface_type == 11:
                         if (
-                            float(grid_z) * model.dx < 0.4
-                            or float(grid_z) * model.dx > 0.53
+                            scalar_index(grid_z) * model.dx < scalar(0.4)
+                            or scalar_index(grid_z) * model.dx > scalar(0.53)
                         ):
-                            state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
-                                0.0, 0.0, 0.0
+                            state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
+                                scalar(0.0), scalar(0.0), scalar(0.0)
                             )
                         else:
                             v_in = state.grid_v_out[grid_x, grid_y, grid_z]
                             state.grid_v_out[grid_x, grid_y, grid_z] = (
-                                wp.vec3(v_in[0], 0.0, v_in[2]) * 0.3
+                                vec3(v_in[0], scalar(0.0), v_in[2]) * scalar(0.3)
                             )
                     else:
                         v = state.grid_v_out[grid_x, grid_y, grid_z]
@@ -642,16 +644,16 @@ class MPMWARP(object):
                             )  # Project out all normal component
                         else:
                             v = (
-                                v - wp.min(normal_component, 0.0) * n
+                                v - wp.min(normal_component, scalar(0.0)) * n
                             )  # Project out only inward normal component
-                        if normal_component < 0.0 and wp.length(v) > 1e-20:
+                        if normal_component < scalar(0.0) and wp.length(v) > scalar(1e-20):
                             v = wp.max(
-                                0.0, wp.length(v) + normal_component * param.friction
+                                scalar(0.0), wp.length(v) + normal_component * param.friction
                             ) * wp.normalize(
                                 v
                             )  # apply friction here
-                        state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
-                            0.0, 0.0, 0.0
+                        state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
+                            scalar(0.0), scalar(0.0), scalar(0.0)
                         )
 
         self.grid_postprocess.append(collide)
@@ -664,20 +666,20 @@ class MPMWARP(object):
         device: str | wp.Device = "cuda:0",
     ) -> None:
         mover_param = Particle_mover()
-        mover_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=float, device=device)
-        mover_param.velocity = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
+        mover_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=scalar, device=device)
+        mover_param.velocity = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=vec3, device=device)
 
         @wp.kernel
         def zero_grid(
             param: Particle_mover
         ):
             grid_x, grid_y, grid_z = wp.tid()
-            param.weight[grid_x, grid_y, grid_z] = 0.0
-            param.velocity[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
+            param.weight[grid_x, grid_y, grid_z] = scalar(0.0)
+            param.velocity[grid_x, grid_y, grid_z] = vec3(scalar(0.0), scalar(0.0), scalar(0.0))
 
         @wp.kernel
         def add_velocity_traditional(
-            particle_velocity: wp.array(dtype=wp.vec3),
+            particle_velocity: wp.array(dtype=vec3),
             param: Particle_mover,
             state: MPMStateStruct,
             model: MPMModelStruct,
@@ -686,21 +688,21 @@ class MPMWARP(object):
             p = wp.tid()
 
             grid_pos = state.particle_x[p+offset] * model.inv_dx
-            base_pos_x = wp.int(grid_pos[0] - 0.5)
-            base_pos_y = wp.int(grid_pos[1] - 0.5)
-            base_pos_z = wp.int(grid_pos[2] - 0.5)
+            base_pos_x = wp.int(grid_pos[0] - scalar(0.5))
+            base_pos_y = wp.int(grid_pos[1] - scalar(0.5))
+            base_pos_z = wp.int(grid_pos[2] - scalar(0.5))
 
             if base_pos_x >= 0 and base_pos_x < model.grid_dim_x - 3 and base_pos_y >= 0 and base_pos_y < model.grid_dim_y - 3 and base_pos_z >= 0 and base_pos_z < model.grid_dim_z - 3:
-                fx = grid_pos - wp.vec3(
-                    wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+                fx = grid_pos - vec3(
+                    scalar_index(base_pos_x), scalar_index(base_pos_y), scalar_index(base_pos_z)
                 )
-                wa = wp.vec3(1.5) - fx
-                wb = fx - wp.vec3(1.0)
-                wc = fx - wp.vec3(0.5)
+                wa = vec3(scalar(1.5)) - fx
+                wb = fx - vec3(scalar(1.0))
+                wc = fx - vec3(scalar(0.5))
                 w = wp.matrix_from_cols(
-                    wp.cw_mul(wa, wa) * 0.5,
-                    wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-                    wp.cw_mul(wc, wc) * 0.5,
+                    wp.cw_mul(wa, wa) * scalar(0.5),
+                    vec3(scalar(0.0), scalar(0.0), scalar(0.0)) - wp.cw_mul(wb, wb) + vec3(scalar(0.75)),
+                    wp.cw_mul(wc, wc) * scalar(0.5),
                 )
 
                 for i in range(0, 3):
@@ -715,7 +717,7 @@ class MPMWARP(object):
 
         @wp.kernel
         def add_velocity_verts(
-            particle_velocity: wp.array(dtype=wp.vec3),
+            particle_velocity: wp.array(dtype=vec3),
             param: Particle_mover,
             state: MPMStateStruct,
             model: MPMModelStruct,
@@ -724,21 +726,21 @@ class MPMWARP(object):
             p = wp.tid()
 
             grid_pos = state.particle_x[p+offset] * model.inv_dx
-            base_pos_x = wp.int(grid_pos[0] - 0.5)
-            base_pos_y = wp.int(grid_pos[1] - 0.5)
-            base_pos_z = wp.int(grid_pos[2] - 0.5)
+            base_pos_x = wp.int(grid_pos[0] - scalar(0.5))
+            base_pos_y = wp.int(grid_pos[1] - scalar(0.5))
+            base_pos_z = wp.int(grid_pos[2] - scalar(0.5))
 
             if base_pos_x >= 0 and base_pos_x < model.grid_dim_x - 3 and base_pos_y >= 0 and base_pos_y < model.grid_dim_y - 3 and base_pos_z >= 0 and base_pos_z < model.grid_dim_z - 3:
-                fx = grid_pos - wp.vec3(
-                    wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+                fx = grid_pos - vec3(
+                    scalar_index(base_pos_x), scalar_index(base_pos_y), scalar_index(base_pos_z)
                 )
-                wa = wp.vec3(1.5) - fx
-                wb = fx - wp.vec3(1.0)
-                wc = fx - wp.vec3(0.5)
+                wa = vec3(scalar(1.5)) - fx
+                wb = fx - vec3(scalar(1.0))
+                wc = fx - vec3(scalar(0.5))
                 w = wp.matrix_from_cols(
-                    wp.cw_mul(wa, wa) * 0.5,
-                    wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-                    wp.cw_mul(wc, wc) * 0.5,
+                    wp.cw_mul(wa, wa) * scalar(0.5),
+                    vec3(scalar(0.0), scalar(0.0), scalar(0.0)) - wp.cw_mul(wb, wb) + vec3(scalar(0.75)),
+                    wp.cw_mul(wc, wc) * scalar(0.5),
                 )
 
                 for i in range(0, 3):
@@ -753,7 +755,7 @@ class MPMWARP(object):
         
         @wp.kernel
         def add_velocity_faces(
-            particle_velocity: wp.array(dtype=wp.vec3),
+            particle_velocity: wp.array(dtype=vec3),
             param: Particle_mover,
             state: MPMStateStruct,
             model: MPMModelStruct,
@@ -761,21 +763,21 @@ class MPMWARP(object):
             p = wp.tid()
 
             grid_pos = state.particle_x[p] * model.inv_dx
-            base_pos_x = wp.int(grid_pos[0] - 0.5)
-            base_pos_y = wp.int(grid_pos[1] - 0.5)
-            base_pos_z = wp.int(grid_pos[2] - 0.5)
+            base_pos_x = wp.int(grid_pos[0] - scalar(0.5))
+            base_pos_y = wp.int(grid_pos[1] - scalar(0.5))
+            base_pos_z = wp.int(grid_pos[2] - scalar(0.5))
 
             if base_pos_x >= 0 and base_pos_x < model.grid_dim_x - 3 and base_pos_y >= 0 and base_pos_y < model.grid_dim_y - 3 and base_pos_z >= 0 and base_pos_z < model.grid_dim_z - 3:
-                fx = grid_pos - wp.vec3(
-                    wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+                fx = grid_pos - vec3(
+                    scalar_index(base_pos_x), scalar_index(base_pos_y), scalar_index(base_pos_z)
                 )
-                wa = wp.vec3(1.5) - fx
-                wb = fx - wp.vec3(1.0)
-                wc = fx - wp.vec3(0.5)
+                wa = vec3(scalar(1.5)) - fx
+                wb = fx - vec3(scalar(1.0))
+                wc = fx - vec3(scalar(0.5))
                 w = wp.matrix_from_cols(
-                    wp.cw_mul(wa, wa) * 0.5,
-                    wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-                    wp.cw_mul(wc, wc) * 0.5,
+                    wp.cw_mul(wa, wa) * scalar(0.5),
+                    vec3(scalar(0.0), scalar(0.0), scalar(0.0)) - wp.cw_mul(wb, wb) + vec3(scalar(0.75)),
+                    wp.cw_mul(wc, wc) * scalar(0.5),
                 )
 
                 for i in range(0, 3):
@@ -794,39 +796,38 @@ class MPMWARP(object):
             param: Particle_mover,
         ):
             grid_x, grid_y, grid_z = wp.tid()
-            if param.weight[grid_x, grid_y, grid_z] > 1e-15:
-                inv_w = 1.0 / param.weight[grid_x, grid_y, grid_z]
+            if param.weight[grid_x, grid_y, grid_z] > scalar(1e-15):
+                inv_w = scalar(1.0) / param.weight[grid_x, grid_y, grid_z]
                 v = param.velocity[grid_x, grid_y, grid_z] * inv_w
                 state.grid_v_out[grid_x, grid_y, grid_z] = v
 
         self.particle_movers.append([zero_grid, add_velocity_traditional, add_velocity_verts, add_velocity_faces, normalize_grid])
         self.particle_mover_params.append(mover_param)
 
-    # a mesh specified by a mesh_id
     def add_mesh_collider(
         self,
-        mesh_id: int,
+        mesh: SimulationMesh,
         n_grid: int,
         friction: float = 0.0,
         device: str | wp.Device = "cuda:0",
     ) -> None:
         collider_param = Mesh_collider()
-        collider_param.mesh_id = mesh_id
+        collider_param.mesh = mesh
         collider_param.friction = friction
-        collider_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=float, device=device)
-        collider_param.mesh_v_in = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
-        collider_param.mesh_v_out = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
-        collider_param.mesh_normal = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=wp.vec3, device=device)
+        collider_param.weight = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=scalar, device=device)
+        collider_param.mesh_v_in = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=vec3, device=device)
+        collider_param.mesh_v_out = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=vec3, device=device)
+        collider_param.mesh_normal = wp.zeros(shape=(n_grid, n_grid, n_grid), dtype=vec3, device=device)
 
         @wp.kernel
         def zero_grid(
             param: Mesh_collider
         ):
             grid_x, grid_y, grid_z = wp.tid()
-            param.weight[grid_x, grid_y, grid_z] = 0.0
-            param.mesh_v_in[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
-            param.mesh_v_out[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
-            param.mesh_normal[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
+            param.weight[grid_x, grid_y, grid_z] = scalar(0.0)
+            param.mesh_v_in[grid_x, grid_y, grid_z] = vec3(scalar(0.0), scalar(0.0), scalar(0.0))
+            param.mesh_v_out[grid_x, grid_y, grid_z] = vec3(scalar(0.0), scalar(0.0), scalar(0.0))
+            param.mesh_normal[grid_x, grid_y, grid_z] = vec3(scalar(0.0), scalar(0.0), scalar(0.0))
 
         @wp.kernel
         def compute_mesh(
@@ -834,7 +835,7 @@ class MPMWARP(object):
             model: MPMModelStruct,
         ):
             p = wp.tid()
-            mesh = wp.mesh_get(param.mesh_id)
+            mesh = param.mesh
 
             vertex_index_0 = mesh.indices[3*p+0]
             vertex_index_1 = mesh.indices[3*p+1]
@@ -843,31 +844,32 @@ class MPMWARP(object):
             vertex_point_0 = mesh.points[vertex_index_0]
             vertex_point_1 = mesh.points[vertex_index_1]
             vertex_point_2 = mesh.points[vertex_index_2]
-            face_point = (vertex_point_0 + vertex_point_1 + vertex_point_2) / 3.0
+            face_point = (vertex_point_0 + vertex_point_1 + vertex_point_2) / scalar(3.0)
 
             vertex_velocity_0 = mesh.velocities[vertex_index_0]
             vertex_velocity_1 = mesh.velocities[vertex_index_1]
             vertex_velocity_2 = mesh.velocities[vertex_index_2]
-            face_velocity = (vertex_velocity_0 + vertex_velocity_1 + vertex_velocity_2) / 3.0
+            face_velocity = (vertex_velocity_0 + vertex_velocity_1 + vertex_velocity_2) / scalar(3.0)
 
-            face_normal = wp.mesh_eval_face_normal(param.mesh_id, p)
+            face_normal = wp.normalize(wp.cross(vertex_point_1 - vertex_point_0,
+                                                vertex_point_2 - vertex_point_0))
 
             grid_pos = face_point * model.inv_dx
-            base_pos_x = wp.int(grid_pos[0] - 0.5)
-            base_pos_y = wp.int(grid_pos[1] - 0.5)
-            base_pos_z = wp.int(grid_pos[2] - 0.5)
+            base_pos_x = wp.int(grid_pos[0] - scalar(0.5))
+            base_pos_y = wp.int(grid_pos[1] - scalar(0.5))
+            base_pos_z = wp.int(grid_pos[2] - scalar(0.5))
 
             if base_pos_x >= 0 and base_pos_x < model.grid_dim_x - 3 and base_pos_y >= 0 and base_pos_y < model.grid_dim_y - 3 and base_pos_z >= 0 and base_pos_z < model.grid_dim_z - 3:
-                fx = grid_pos - wp.vec3(
-                    wp.float(base_pos_x), wp.float(base_pos_y), wp.float(base_pos_z)
+                fx = grid_pos - vec3(
+                    scalar_index(base_pos_x), scalar_index(base_pos_y), scalar_index(base_pos_z)
                 )
-                wa = wp.vec3(1.5) - fx
-                wb = fx - wp.vec3(1.0)
-                wc = fx - wp.vec3(0.5)
+                wa = vec3(scalar(1.5)) - fx
+                wb = fx - vec3(scalar(1.0))
+                wc = fx - vec3(scalar(0.5))
                 w = wp.matrix_from_cols(
-                    wp.cw_mul(wa, wa) * 0.5,
-                    wp.vec3(0.0, 0.0, 0.0) - wp.cw_mul(wb, wb) + wp.vec3(0.75),
-                    wp.cw_mul(wc, wc) * 0.5,
+                    wp.cw_mul(wa, wa) * scalar(0.5),
+                    vec3(scalar(0.0), scalar(0.0), scalar(0.0)) - wp.cw_mul(wb, wb) + vec3(scalar(0.75)),
+                    wp.cw_mul(wc, wc) * scalar(0.5),
                 )
 
                 for i in range(0, 3):
@@ -886,8 +888,8 @@ class MPMWARP(object):
             param: Mesh_collider,
         ):
             grid_x, grid_y, grid_z = wp.tid()
-            if param.weight[grid_x, grid_y, grid_z] > 1e-15:
-                inv_w = 1.0 / param.weight[grid_x, grid_y, grid_z]
+            if param.weight[grid_x, grid_y, grid_z] > scalar(1e-15):
+                inv_w = scalar(1.0) / param.weight[grid_x, grid_y, grid_z]
                 v = param.mesh_v_in[grid_x, grid_y, grid_z] * inv_w
                 param.mesh_v_out[grid_x, grid_y, grid_z] = v
 
@@ -898,16 +900,16 @@ class MPMWARP(object):
         ):
             grid_x, grid_y, grid_z = wp.tid()
             v = state.grid_v_out[grid_x, grid_y, grid_z]
-            if param.weight[grid_x, grid_y, grid_z] > 1e-15:
+            if param.weight[grid_x, grid_y, grid_z] > scalar(1e-15):
                 v_rel = v - param.mesh_v_out[grid_x, grid_y, grid_z]
                 n = wp.normalize(param.mesh_normal[grid_x, grid_y, grid_z])
                 normal_component = wp.dot(v_rel, n)
                 v_proj = (
-                    v_rel - wp.min(normal_component, 0.0) * n
+                    v_rel - wp.min(normal_component, scalar(0.0)) * n
                 )  # Project out only inward normal component
-                if normal_component < 0.0 and wp.length(v_proj) > 1e-20:
+                if normal_component < scalar(0.0) and wp.length(v_proj) > scalar(1e-20):
                     v_fric = wp.max(
-                        0.0, wp.length(v_proj) + normal_component * param.friction
+                        scalar(0.0), wp.length(v_proj) + normal_component * param.friction
                     ) * wp.normalize(
                         v_proj
                     )  # apply friction here
@@ -942,27 +944,27 @@ class MPMWARP(object):
         collider_param = Dirichlet_collider()
         collider_param.start_time = start_time
         collider_param.end_time = end_time
-        collider_param.point = wp.vec3(point[0], point[1], point[2])
+        collider_param.point = vec3(point[0], point[1], point[2])
         collider_param.size = size
-        collider_param.velocity = wp.vec3(velocity[0], velocity[1], velocity[2])
+        collider_param.velocity = vec3(velocity[0], velocity[1], velocity[2])
         # collider_param.threshold = threshold
         collider_param.reset = reset
         self.collider_params.append(collider_param)
 
         @wp.kernel
         def collide(
-            time: float,
-            dt: float,
+            time: scalar,
+            dt: scalar,
             state: MPMStateStruct,
             model: MPMModelStruct,
             param: Dirichlet_collider,
         ):
             grid_x, grid_y, grid_z = wp.tid()
             if time >= param.start_time and time < param.end_time:
-                offset = wp.vec3(
-                    float(grid_x) * model.dx - param.point[0],
-                    float(grid_y) * model.dx - param.point[1],
-                    float(grid_z) * model.dx - param.point[2],
+                offset = vec3(
+                    scalar_index(grid_x) * model.dx - param.point[0],
+                    scalar_index(grid_y) * model.dx - param.point[1],
+                    scalar_index(grid_z) * model.dx - param.point[2],
                 )
                 if (
                     wp.abs(offset[0]) < param.size[0]
@@ -971,12 +973,12 @@ class MPMWARP(object):
                 ):
                     state.grid_v_out[grid_x, grid_y, grid_z] = param.velocity
             elif param.reset == 1:
-                if time < param.end_time + 15.0 * dt:
-                    state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
+                if time < param.end_time + scalar(15.0) * dt:
+                    state.grid_v_out[grid_x, grid_y, grid_z] = vec3(scalar(0.0), scalar(0.0), scalar(0.0))
 
         def modify(time, dt, param: Dirichlet_collider):
             if time >= param.start_time and time < param.end_time:
-                param.point = wp.vec3(
+                param.point = vec3(
                     param.point[0] + dt * param.velocity[0],
                     param.point[1] + dt * param.velocity[1],
                     param.point[2] + dt * param.velocity[2],
@@ -994,8 +996,8 @@ class MPMWARP(object):
 
         @wp.kernel
         def collide(
-            time: float,
-            dt: float,
+            time: scalar,
+            dt: scalar,
             state: MPMStateStruct,
             model: MPMModelStruct,
             param: Dirichlet_collider,
@@ -1004,8 +1006,8 @@ class MPMWARP(object):
             padding = 3
             if time >= param.start_time and time < param.end_time:
                 if grid_x < padding and state.grid_v_out[grid_x, grid_y, grid_z][0] < 0:
-                    state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
-                        0.0,
+                    state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
+                        scalar(0.0),
                         state.grid_v_out[grid_x, grid_y, grid_z][1],
                         state.grid_v_out[grid_x, grid_y, grid_z][2],
                     )
@@ -1013,42 +1015,42 @@ class MPMWARP(object):
                     grid_x >= model.grid_dim_x - padding
                     and state.grid_v_out[grid_x, grid_y, grid_z][0] > 0
                 ):
-                    state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
-                        0.0,
+                    state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
+                        scalar(0.0),
                         state.grid_v_out[grid_x, grid_y, grid_z][1],
                         state.grid_v_out[grid_x, grid_y, grid_z][2],
                     )
 
                 if grid_y < padding and state.grid_v_out[grid_x, grid_y, grid_z][1] < 0:
-                    state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
+                    state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
                         state.grid_v_out[grid_x, grid_y, grid_z][0],
-                        0.0,
+                        scalar(0.0),
                         state.grid_v_out[grid_x, grid_y, grid_z][2],
                     )
                 if (
                     grid_y >= model.grid_dim_y - padding
                     and state.grid_v_out[grid_x, grid_y, grid_z][1] > 0
                 ):
-                    state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
+                    state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
                         state.grid_v_out[grid_x, grid_y, grid_z][0],
-                        0.0,
+                        scalar(0.0),
                         state.grid_v_out[grid_x, grid_y, grid_z][2],
                     )
 
                 if grid_z < padding and state.grid_v_out[grid_x, grid_y, grid_z][2] < 0:
-                    state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
+                    state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
                         state.grid_v_out[grid_x, grid_y, grid_z][0],
                         state.grid_v_out[grid_x, grid_y, grid_z][1],
-                        0.0,
+                        scalar(0.0),
                     )
                 if (
                     grid_z >= model.grid_dim_z - padding
                     and state.grid_v_out[grid_x, grid_y, grid_z][2] > 0
                 ):
-                    state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(
+                    state.grid_v_out[grid_x, grid_y, grid_z] = vec3(
                         state.grid_v_out[grid_x, grid_y, grid_z][0],
                         state.grid_v_out[grid_x, grid_y, grid_z][1],
-                        0.0,
+                        scalar(0.0),
                     )
 
         self.grid_postprocess.append(collide)
@@ -1072,11 +1074,11 @@ class MPMWARP(object):
         impulse_param.start_time = start_time
         impulse_param.end_time = start_time + dt * num_dt
 
-        impulse_param.point = wp.vec3(point[0], point[1], point[2])
-        impulse_param.size = wp.vec3(size[0], size[1], size[2])
+        impulse_param.point = vec3(point[0], point[1], point[2])
+        impulse_param.size = vec3(size[0], size[1], size[2])
         impulse_param.mask = wp.zeros(shape=self.n_particles, dtype=int, device=device)
 
-        impulse_param.force = wp.vec3(
+        impulse_param.force = vec3(
             force[0],
             force[1],
             force[2],
@@ -1093,12 +1095,12 @@ class MPMWARP(object):
 
         @wp.kernel
         def apply_force(
-            time: float, dt: float, state: MPMStateStruct, param: Impulse_modifier
+            time: scalar, dt: scalar, state: MPMStateStruct, param: Impulse_modifier
         ):
             p = wp.tid()
             if time >= param.start_time and time < param.end_time:
                 if param.mask[p] == 1:
-                    impulse = wp.vec3(
+                    impulse = vec3(
                         param.force[0] / state.particle_mass[p],
                         param.force[1] / state.particle_mass[p],
                         param.force[2] / state.particle_mass[p],
@@ -1114,10 +1116,10 @@ class MPMWARP(object):
 
         velocity_modifier_params = ParticleVelocityModifier()
 
-        velocity_modifier_params.point = wp.vec3(point[0], point[1], point[2])
-        velocity_modifier_params.size = wp.vec3(size[0], size[1], size[2])
+        velocity_modifier_params.point = vec3(point[0], point[1], point[2])
+        velocity_modifier_params.size = vec3(size[0], size[1], size[2])
 
-        velocity_modifier_params.velocity = wp.vec3(
+        velocity_modifier_params.velocity = vec3(
             velocity[0], velocity[1], velocity[2]
         )
 
@@ -1138,7 +1140,7 @@ class MPMWARP(object):
 
         @wp.kernel
         def modify_particle_v_before_p2g(
-            time: float,
+            time: scalar,
             state: MPMStateStruct,
             velocity_modifier_params: ParticleVelocityModifier,
         ):
@@ -1174,15 +1176,15 @@ class MPMWARP(object):
 
         velocity_modifier_params = ParticleVelocityModifier()
 
-        velocity_modifier_params.point = wp.vec3(point[0], point[1], point[2])
-        velocity_modifier_params.half_height_and_radius = wp.vec2(
+        velocity_modifier_params.point = vec3(point[0], point[1], point[2])
+        velocity_modifier_params.half_height_and_radius = vec2(
             half_height_and_radius[0], half_height_and_radius[1]
         )
-        velocity_modifier_params.normal = wp.vec3(normal[0], normal[1], normal[2])
+        velocity_modifier_params.normal = vec3(normal[0], normal[1], normal[2])
 
-        horizontal_1 = wp.vec3(1.0, 1.0, 1.0)
+        horizontal_1 = vec3(1.0, 1.0, 1.0)
         if wp.abs(wp.dot(velocity_modifier_params.normal, horizontal_1)) < 0.01:
-            horizontal_1 = wp.vec3(0.72, 0.37, -0.67)
+            horizontal_1 = vec3(0.72, 0.37, -0.67)
         horizontal_1 = (
             horizontal_1
             - wp.dot(horizontal_1, velocity_modifier_params.normal)
@@ -1214,7 +1216,7 @@ class MPMWARP(object):
 
         @wp.kernel
         def modify_particle_v_before_p2g(
-            time: float,
+            time: scalar,
             state: MPMStateStruct,
             velocity_modifier_params: ParticleVelocityModifier,
         ):
@@ -1300,7 +1302,7 @@ class MPMWARP(object):
 
         velocity_modifier_params = ParticleVelocityModifier()
 
-        velocity_modifier_params.velocity = wp.vec3(
+        velocity_modifier_params.velocity = vec3(
             velocity[0],
             velocity[1],
             velocity[2],
@@ -1315,7 +1317,7 @@ class MPMWARP(object):
 
         @wp.kernel
         def modify_particle_v_before_p2g(
-            time: float,
+            time: scalar,
             state: MPMStateStruct,
             velocity_modifier_params: ParticleVelocityModifier,
         ):
@@ -1342,8 +1344,8 @@ class MPMWARP(object):
 
         @wp.kernel
         def modify_grid_v_before_g2p(
-            time: float,
-            dt: float,
+            time: scalar,
+            dt: scalar,
             state: MPMStateStruct,
             model: MPMModelStruct,
             grid_modifier_params: GridCollider,
@@ -1351,7 +1353,7 @@ class MPMWARP(object):
             grid_x, grid_y, grid_z = wp.tid()
 
             if grid_modifier_params.mask[grid_x, grid_y, grid_z] >= 1:
-                state.grid_v_out[grid_x, grid_y, grid_z] = wp.vec3(0.0, 0.0, 0.0)
+                state.grid_v_out[grid_x, grid_y, grid_z] = vec3(scalar(0.0), scalar(0.0), scalar(0.0))
 
         self.grid_postprocess.append(modify_grid_v_before_g2p)
         self.modify_bc.append(None)
@@ -1379,10 +1381,10 @@ class MPMWARP(object):
         impulse_param.end_time = end_time
         impulse_param.mask = wp.from_torch(particle_mask)
 
-        impulse_param.point = wp.vec3(point[0], point[1], point[2])
-        impulse_param.size = wp.vec3(size[0], size[1], size[2])
+        impulse_param.point = vec3(point[0], point[1], point[2])
+        impulse_param.size = vec3(size[0], size[1], size[2])
 
-        impulse_param.force = wp.vec3(
+        impulse_param.force = vec3(
             force[0],
             force[1],
             force[2],
@@ -1399,7 +1401,7 @@ class MPMWARP(object):
 
         @wp.kernel
         def apply_force(
-            time: float, dt: float, state: MPMStateStruct, param: Impulse_modifier
+            time: scalar, dt: scalar, state: MPMStateStruct, param: Impulse_modifier
         ):
             p = wp.tid()
             if time >= param.start_time and time < param.end_time:
@@ -1409,7 +1411,7 @@ class MPMWARP(object):
                     #     param.force[1] / state.particle_mass[p],
                     #     param.force[2] / state.particle_mass[p],
                     # )
-                    impulse = wp.vec3(
+                    impulse = vec3(
                         param.force[0],
                         param.force[1],
                         param.force[2],

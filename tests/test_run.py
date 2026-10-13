@@ -15,6 +15,15 @@ import run
 
 
 class LauncherTests(unittest.TestCase):
+    def test_precision_routes_to_simulation_stages(self) -> None:
+        self.checkpoint("appearance/point_cloud/timestep_030000/point_cloud.ply")
+        command = self.launch("material", "--precision", "fp64")
+        self.assertEqual(command[command.index("--precision") + 1], "fp64")
+        command = self.launch("material")
+        self.assertEqual(command[command.index("--precision") + 1], "fp32")
+        with self.assertRaisesRegex(AssertionError, "applies to simulation stages"):
+            self.launch("appearance", "--precision", "fp64")
+
     def setUp(self) -> None:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

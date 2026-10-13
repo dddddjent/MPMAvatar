@@ -31,7 +31,7 @@ class TrainingResumeTests(unittest.TestCase):
             trainer.output_path = str(directory)
             trainer.step = 0
             trainer.iterations = 3
-            trainer.args = SimpleNamespace(stop_after=cap)
+            trainer.args = SimpleNamespace(stop_after=cap, early_stop_patience=0, early_stop_tol=0.0)
             trainer.accelerator = accelerator
             trainer.scene = SimpleNamespace(train_frame_index=[0, 1], dataset_dir="/dataset")
             trainer.initial_cloth_velocity = torch.ones(3, 3)

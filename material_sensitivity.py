@@ -45,8 +45,11 @@ def float32(value: float) -> float:
     return struct.unpack("f", struct.pack("f", value))[0]
 
 
-def effective_parameters(values: dict[str, float]) -> dict[str, float]:
-    """Scalar values actually passed to the native float32 material kernels."""
+def effective_parameters(values: dict[str, float], precision: str = "fp32") -> dict[str, float]:
+    """Scalar values actually passed to the selected material kernels."""
+    assert precision in ("fp32", "fp64"), precision
+    if precision == "fp64":
+        return {key: values[key] / 100.0 * 100.0 if key == "E" else values[key] for key in PARAMETERS}
     return {key: float32(float32(values[key] / 100.0) * 100.0) if key == "E"
             else float32(values[key]) for key in PARAMETERS}
 
@@ -70,7 +73,7 @@ def plan(config: dict[str, Any]) -> list[dict[str, Any]]:
                         values = {key: float(center[key]) for key in PARAMETERS}
                         values[direction] += offset * step
                         assert all(math.isfinite(value) and value > 0 for value in values.values())
-                        effective = effective_parameters(values)
+                        effective = effective_parameters(values, config.get("precision", "fp32"))
                         rows.append({"garment": garment, "parameter_set": name,
                                      "direction": direction, "step_size": step, "offset": offset,
                                      **window, **values,
@@ -103,13 +106,16 @@ def prepare(config_path: Path, output: Path) -> None:
     (output / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     write_csv(output / "manifest.csv", rows)
     collapsed = sum(row["offset"] != 0 and row[f"effective_{row['direction']}"] ==
-                    effective_parameters(config["parameter_sets"][row["parameter_set"]])[row["direction"]]
+                    effective_parameters(config["parameter_sets"][row["parameter_set"]], config.get("precision", "fp32"))[row["direction"]]
                     for row in rows)
     print(f"Prepared {len(rows)} native rollouts and 6 center AD evaluations: {output}", flush=True)
-    print(f"Float32 rounds {collapsed} nonzero perturbations to the center; requested steps are preserved.", flush=True)
+    print(f"{config.get('precision', 'fp32')} rounds {collapsed} nonzero perturbations to the center; requested steps are preserved.", flush=True)
 
 
 def build_trainer(config: dict[str, Any], output: Path, garment: str, parameter_set: str) -> Trainer:
+    from simulation_runtime import configure_precision
+    precision = config.get("precision", "fp32")
+    configure_precision(precision)
     if config.get("deterministic", False):
         from simulation_runtime import configure_simulation
         configure_simulation(True)
@@ -134,8 +140,9 @@ def build_trainer(config: dict[str, Any], output: Path, garment: str, parameter_
                 "--uv_path", str(assets / "mesh_processed.obj"), "--test_camera_index", "0",
                 "--train_frame_start_num", str(window["frame_start"]), str(window["frame_count"]),
                 "--test_frame_start_num", str(window["frame_start"]), "2",
-                "--iterations", "200", "--init_params_path", "", "--material_gradient", "ad",
+                "--iterations", "200", "--init_params_path", "", "--material_gradient", config.get("material_gradient", "ad"),
                 "--grid_size", str(config["grid_size"]), "--substep", str(config["substeps"]),
+                "--precision", precision,
                 "--seed", str(config["seed"])]
     if config.get("deterministic", False):
         sys.argv.append("--deterministic")

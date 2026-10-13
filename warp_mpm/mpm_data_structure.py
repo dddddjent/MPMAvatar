@@ -1,4 +1,5 @@
 import warp as wp
+from warp_mpm.precision import scalar, vec2, vec3, mat22, mat33, torch_dtype
 import torch
 from typing import Optional, Union, Sequence, Any
 from torch import Tensor
@@ -13,21 +14,21 @@ from warp_utils import from_torch_safe
 class MPMStateStruct:
     ###### essential #####
     # particle
-    particle_x: wp.array(dtype=wp.vec3)  # current position
-    particle_v: wp.array(dtype=wp.vec3)  # particle velocity
-    particle_F: wp.array(dtype=wp.mat33)  # particle elastic deformation gradient
-    particle_cov: wp.array(dtype=float)  # current covariance matrix
+    particle_x: wp.array(dtype=vec3)  # current position
+    particle_v: wp.array(dtype=vec3)  # particle velocity
+    particle_F: wp.array(dtype=mat33)  # particle elastic deformation gradient
+    particle_cov: wp.array(dtype=scalar)  # current covariance matrix
     particle_F_trial: wp.array(
-        dtype=wp.mat33
+        dtype=mat33
     )  # apply return mapping on this to obtain elastic def grad
-    particle_stress: wp.array(dtype=wp.mat33)  # Kirchoff stress, elastic stress
-    particle_C: wp.array(dtype=wp.mat33)
-    particle_vol: wp.array(dtype=float)  # current volume
-    particle_mass: wp.array(dtype=float)  # mass
-    particle_density: wp.array(dtype=float)  # density
-    particle_R_inv: wp.array(dtype=wp.vec3)
-    particle_D_inv: wp.array(dtype=wp.mat33)
-    particle_d: wp.array(dtype=wp.mat33)
+    particle_stress: wp.array(dtype=mat33)  # Kirchoff stress, elastic stress
+    particle_C: wp.array(dtype=mat33)
+    particle_vol: wp.array(dtype=scalar)  # current volume
+    particle_mass: wp.array(dtype=scalar)  # mass
+    particle_density: wp.array(dtype=scalar)  # density
+    particle_R_inv: wp.array(dtype=vec3)
+    particle_D_inv: wp.array(dtype=mat33)
+    particle_d: wp.array(dtype=mat33)
     # particle_d_trial: wp.array(dtype=wp.mat33)
 
     particle_traditional: wp.array(dtype=int)
@@ -37,14 +38,14 @@ class MPMStateStruct:
         dtype=int
     )  # only particle_selection[p] = 0 will be simulated
 
-    faces: wp.array(dtype=wp.vec3)
-    vertex_force: wp.array(dtype=wp.vec3)
+    faces: wp.array(dtype=vec3)
+    vertex_force: wp.array(dtype=vec3)
 
     # grid
-    grid_m: wp.array(dtype=float, ndim=3)
-    grid_v_in: wp.array(dtype=wp.vec3, ndim=3)  # grid node momentum/velocity
+    grid_m: wp.array(dtype=scalar, ndim=3)
+    grid_v_in: wp.array(dtype=vec3, ndim=3)  # grid node momentum/velocity
     grid_v_out: wp.array(
-        dtype=wp.vec3, ndim=3
+        dtype=vec3, ndim=3
     )  # grid node momentum/velocity, after grid update
 
     def init(
@@ -58,54 +59,54 @@ class MPMStateStruct:
         n_no_vertices = n_particles - n_vertices
         # shape default is int. number of particles
         self.particle_x = wp.zeros(
-            shape=n_particles, dtype=wp.vec3, device=device, requires_grad=requires_grad
+            shape=n_particles, dtype=vec3, device=device, requires_grad=requires_grad
         )
         self.particle_v = wp.zeros(
-            shape=n_particles, dtype=wp.vec3, device=device, requires_grad=requires_grad
+            shape=n_particles, dtype=vec3, device=device, requires_grad=requires_grad
         )
         self.particle_F = wp.zeros(
-            shape=n_no_vertices, dtype=wp.mat33, device=device, requires_grad=requires_grad
+            shape=n_no_vertices, dtype=mat33, device=device, requires_grad=requires_grad
         )
         self.particle_d = wp.zeros(
-            shape=n_elements, dtype=wp.mat33, device=device, requires_grad=requires_grad
+            shape=n_elements, dtype=mat33, device=device, requires_grad=requires_grad
         )
         self.particle_cov = wp.zeros(
-            shape=n_no_vertices * 6, dtype=float, device=device, requires_grad=False
+            shape=n_no_vertices * 6, dtype=scalar, device=device, requires_grad=False
         )
 
         self.particle_F_trial = wp.zeros(
-            shape=n_no_vertices, dtype=wp.mat33, device=device, requires_grad=requires_grad
+            shape=n_no_vertices, dtype=mat33, device=device, requires_grad=requires_grad
         )
 
         self.particle_stress = wp.zeros(
-            shape=n_no_vertices, dtype=wp.mat33, device=device, requires_grad=requires_grad
+            shape=n_no_vertices, dtype=mat33, device=device, requires_grad=requires_grad
         )
         self.particle_C = wp.zeros(
-            shape=n_particles, dtype=wp.mat33, device=device, requires_grad=requires_grad
+            shape=n_particles, dtype=mat33, device=device, requires_grad=requires_grad
         )
 
         self.particle_vol = wp.zeros(
-            shape=n_particles, dtype=float, device=device, requires_grad=False
+            shape=n_particles, dtype=scalar, device=device, requires_grad=False
         )
         self.particle_mass = wp.zeros(
-            shape=n_particles, dtype=float, device=device, requires_grad=False
+            shape=n_particles, dtype=scalar, device=device, requires_grad=False
         )
         self.particle_density = wp.zeros(
-            shape=n_particles, dtype=float, device=device, requires_grad=False
+            shape=n_particles, dtype=scalar, device=device, requires_grad=False
         )
         self.particle_R_inv = wp.zeros(
-            shape=n_elements, dtype=wp.vec3, device=device, requires_grad=True
+            shape=n_elements, dtype=vec3, device=device, requires_grad=True
             # shape=n_elements, dtype=wp.vec3, device=device, requires_grad=False
         )
         self.particle_D_inv = wp.zeros(
-            shape=n_elements, dtype=wp.mat33, device=device, requires_grad=False
+            shape=n_elements, dtype=mat33, device=device, requires_grad=False
         )
         self.faces = wp.zeros(
-            shape=n_elements, dtype=wp.vec3, device=device, requires_grad=False
+            shape=n_elements, dtype=vec3, device=device, requires_grad=False
         )
 
         self.vertex_force = wp.zeros(
-            shape=n_vertices, dtype=wp.vec3, device=device, requires_grad=requires_grad
+            shape=n_vertices, dtype=vec3, device=device, requires_grad=requires_grad
         )
 
         self.particle_traditional = wp.zeros(
@@ -123,13 +124,13 @@ class MPMStateStruct:
 
         # grid: will init later
         self.grid_m = wp.zeros(
-            (10, 10, 10), dtype=float, device=device, requires_grad=requires_grad
+            (10, 10, 10), dtype=scalar, device=device, requires_grad=requires_grad
         )
         self.grid_v_in = wp.zeros(
-            (10, 10, 10), dtype=wp.vec3, device=device, requires_grad=requires_grad
+            (10, 10, 10), dtype=vec3, device=device, requires_grad=requires_grad
         )
         self.grid_v_out = wp.zeros(
-            (10, 10, 10), dtype=wp.vec3, device=device, requires_grad=requires_grad
+            (10, 10, 10), dtype=vec3, device=device, requires_grad=requires_grad
         )
 
     def init_grid(
@@ -137,19 +138,19 @@ class MPMStateStruct:
     ):
         self.grid_m = wp.zeros(
             (grid_res, grid_res, grid_res),
-            dtype=float,
+            dtype=scalar,
             device=device,
             requires_grad=False,
         )
         self.grid_v_in = wp.zeros(
             (grid_res, grid_res, grid_res),
-            dtype=wp.vec3,
+            dtype=vec3,
             device=device,
             requires_grad=requires_grad,
         )
         self.grid_v_out = wp.zeros(
             (grid_res, grid_res, grid_res),
-            dtype=wp.vec3,
+            dtype=vec3,
             device=device,
             requires_grad=requires_grad,
         )
@@ -179,20 +180,20 @@ class MPMStateStruct:
         if tensor_x is not None:
             self.particle_x = from_torch_safe(
                 tensor_x.contiguous().detach().clone(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
 
         if tensor_volume is not None:
             volume_numpy = tensor_volume.detach().cpu().numpy()
             self.particle_vol = wp.from_numpy(
-                volume_numpy, dtype=float, device=device, requires_grad=False
+                volume_numpy, dtype=scalar, device=device, requires_grad=False
             )
         
         if tensor_D_inv is not None:
             D_inv_numpy = tensor_D_inv.detach().cpu().numpy()
             self.particle_D_inv = wp.from_numpy(
-                D_inv_numpy, dtype=wp.mat33, device=device, requires_grad=False
+                D_inv_numpy, dtype=mat33, device=device, requires_grad=False
             )
         
         # if tensor_R_inv is not None:
@@ -203,26 +204,26 @@ class MPMStateStruct:
         if tensor_R_inv is not None:
             self.particle_R_inv = from_torch_safe(
                 tensor_R_inv.contiguous().detach().clone(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad
             )
         
         if tensor_faces is not None:
             faces_numpy = tensor_faces.detach().cpu().numpy()
             self.faces = wp.from_numpy(
-                faces_numpy, dtype=wp.vec3, device=device, requires_grad=False
+                faces_numpy, dtype=vec3, device=device, requires_grad=False
             )
 
         if tensor_cov is not None:
             cov_numpy = tensor_cov.reshape(-1).detach().clone().cpu().numpy()
             self.particle_cov = wp.from_numpy(
-                cov_numpy, dtype=float, device=device, requires_grad=False
+                cov_numpy, dtype=scalar, device=device, requires_grad=False
             )
 
         if tensor_velocity is not None:
             self.particle_v = from_torch_safe(
                 tensor_velocity.contiguous().detach().clone(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
 
@@ -281,14 +282,14 @@ class MPMStateStruct:
         if tensor_x is not None:
             self.particle_x = from_torch_safe(
                 tensor_x.contiguous().detach(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
         
         if tensor_d is not None:
             self.particle_d = from_torch_safe(
                 tensor_d.contiguous().detach().clone(),
-                dtype=wp.mat33,
+                dtype=mat33,
                 requires_grad=requires_grad,
             )
             # self.particle_d_trial = from_torch_safe(
@@ -300,27 +301,27 @@ class MPMStateStruct:
         if tensor_R_inv is not None:
             self.particle_R_inv = from_torch_safe(
                 tensor_R_inv.contiguous().detach().clone(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
 
         if tensor_cov is not None:
             cov_numpy = tensor_cov.reshape(-1).detach().clone().cpu().numpy()
             self.particle_cov = wp.from_numpy(
-                cov_numpy, dtype=float, device=device, requires_grad=False
+                cov_numpy, dtype=scalar, device=device, requires_grad=False
             )
 
         if tensor_velocity is not None:
             self.particle_v = from_torch_safe(
                 tensor_velocity.contiguous().detach().clone(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
 
         if tensor_density is not None and selection_mask is not None:
             wp_density = from_torch_safe(
                 tensor_density.contiguous().detach().clone(),
-                dtype=wp.float32,
+                dtype=scalar,
                 requires_grad=False,
             )
             # 1 indicate we need to simulate this particle
@@ -385,35 +386,35 @@ class MPMStateStruct:
         if tensor_x is not None:
             self.particle_x = from_torch_safe(
                 tensor_x.contiguous().detach(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
 
         if tensor_velocity is not None:
             self.particle_v = from_torch_safe(
                 tensor_velocity.contiguous().detach().clone(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
 
         if tensor_d is not None:
             self.particle_d = from_torch_safe(
                 tensor_d.contiguous().detach().clone(),
-                dtype=wp.mat33,
+                dtype=mat33,
                 requires_grad=requires_grad,
             )
 
         if tensor_C is not None:
             self.particle_C = from_torch_safe(
                 tensor_C.contiguous().detach().clone(),
-                dtype=wp.mat33,
+                dtype=mat33,
                 requires_grad=requires_grad,
             )
 
         if tensor_R_inv is not None:
             self.particle_R_inv = from_torch_safe(
                 tensor_R_inv.contiguous().detach().clone(),
-                dtype=wp.vec3,
+                dtype=vec3,
                 requires_grad=requires_grad,
             )
 
@@ -441,7 +442,7 @@ class MPMStateStruct:
         n_particles = tensor_density.shape[0]
         wp_density = from_torch_safe(
             tensor_density.contiguous().detach().clone(),
-            dtype=wp.float32,
+            dtype=scalar,
             requires_grad=False,
         )
         
@@ -473,7 +474,7 @@ class MPMStateStruct:
         n_elements = tensor_R_inv.shape[0]
         wp_R_inv = from_torch_safe(
             tensor_R_inv.contiguous().detach().clone(),
-            dtype=wp.vec3,
+            dtype=vec3,
             requires_grad=True,
         )
         
@@ -531,10 +532,10 @@ class MPMStateStruct:
 
 @wp.struct
 class MPMSmallStateStruct:
-    particle_x: wp.array(dtype=wp.vec3)
-    particle_v: wp.array(dtype=wp.vec3)
-    particle_C: wp.array(dtype=wp.mat33)
-    particle_d: wp.array(dtype=wp.mat33)
+    particle_x: wp.array(dtype=vec3)
+    particle_v: wp.array(dtype=vec3)
+    particle_C: wp.array(dtype=mat33)
+    particle_d: wp.array(dtype=mat33)
     # particle_R_inv: wp.array(dtype=wp.vec3)
 
     def init(
@@ -547,16 +548,16 @@ class MPMSmallStateStruct:
     ) -> None:
         # shape default is int. number of particles
         self.particle_x = wp.zeros(
-            shape=n_particles, dtype=wp.vec3, device=device, requires_grad=requires_grad
+            shape=n_particles, dtype=vec3, device=device, requires_grad=requires_grad
         )
         self.particle_v = wp.zeros(
-            shape=n_particles, dtype=wp.vec3, device=device, requires_grad=requires_grad
+            shape=n_particles, dtype=vec3, device=device, requires_grad=requires_grad
         )
         self.particle_C = wp.zeros(
-            shape=n_particles, dtype=wp.mat33, device=device, requires_grad=requires_grad
+            shape=n_particles, dtype=mat33, device=device, requires_grad=requires_grad
         )
         self.particle_d = wp.zeros(
-            shape=n_elements, dtype=wp.mat33, device=device, requires_grad=requires_grad
+            shape=n_elements, dtype=mat33, device=device, requires_grad=requires_grad
         )
         # self.particle_R_inv = wp.zeros(
         #     shape=n_elements, dtype=wp.vec3, device=device, requires_grad=requires_grad
@@ -609,36 +610,36 @@ class MPMSmallStateStruct:
 @wp.struct
 class MPMModelStruct(object):
     ####### essential #######
-    grid_lim: float
+    grid_lim: scalar
     n_particles: int
     n_grid: int
-    dx: float
-    inv_dx: float
+    dx: scalar
+    inv_dx: scalar
     grid_dim_x: int
     grid_dim_y: int
     grid_dim_z: int
-    mu: wp.array(dtype=float)
-    lam: wp.array(dtype=float)
-    E: wp.array(dtype=float)
-    nu: wp.array(dtype=float)
-    gamma: wp.array(dtype=float)
-    kappa: wp.array(dtype=float)
+    mu: wp.array(dtype=scalar)
+    lam: wp.array(dtype=scalar)
+    E: wp.array(dtype=scalar)
+    nu: wp.array(dtype=scalar)
+    gamma: wp.array(dtype=scalar)
+    kappa: wp.array(dtype=scalar)
     material: int
 
     ######## for plasticity ####
-    yield_stress: wp.array(dtype=float)
-    friction_angle: float
-    friction_coeff: float
-    alpha: float
-    gravitational_accelaration: wp.vec3
-    hardening: float
-    xi: float
-    plastic_viscosity: float
-    softening: float
+    yield_stress: wp.array(dtype=scalar)
+    friction_angle: scalar
+    friction_coeff: scalar
+    alpha: scalar
+    gravitational_accelaration: vec3
+    hardening: scalar
+    xi: scalar
+    plastic_viscosity: scalar
+    softening: scalar
 
     ####### for damping
-    rpic_damping: float
-    grid_v_damping_scale: float
+    rpic_damping: scalar
+    grid_v_damping_scale: scalar
 
     ####### for PhysGaussian: covariance
     update_cov_with_F: int
@@ -650,28 +651,28 @@ class MPMModelStruct(object):
         requires_grad=False,
     ) -> None:
         self.E = wp.zeros(
-            shape, dtype=float, device=device, requires_grad=requires_grad
+            shape, dtype=scalar, device=device, requires_grad=requires_grad
         )  # young's modulus
         self.nu = wp.zeros(
-            shape, dtype=float, device=device, requires_grad=requires_grad
+            shape, dtype=scalar, device=device, requires_grad=requires_grad
         )  # poisson's ratio
 
         self.mu = wp.zeros(
-            shape, dtype=float, device=device, requires_grad=requires_grad
+            shape, dtype=scalar, device=device, requires_grad=requires_grad
         )
         self.lam = wp.zeros(
-            shape, dtype=float, device=device, requires_grad=requires_grad
+            shape, dtype=scalar, device=device, requires_grad=requires_grad
         )
 
         self.gamma = wp.zeros(
-            shape, dtype=float, device=device, requires_grad=requires_grad
+            shape, dtype=scalar, device=device, requires_grad=requires_grad
         )
         self.kappa = wp.zeros(
-            shape, dtype=float, device=device, requires_grad=requires_grad
+            shape, dtype=scalar, device=device, requires_grad=requires_grad
         )
 
         self.yield_stress = wp.zeros(
-            shape, dtype=float, device=device, requires_grad=requires_grad
+            shape, dtype=scalar, device=device, requires_grad=requires_grad
         )
 
     def finalize_mu_lam(self, n_particles, device="cuda:0"):
@@ -707,7 +708,7 @@ class MPMModelStruct(object):
         self.friction_coeff = wp.tan(self.friction_angle / 180.0 * 3.14159265)
         self.alpha = wp.sqrt(2.0 / 3.0) * 2.0 * sin_phi / (3.0 - sin_phi)
 
-        self.gravitational_accelaration = wp.vec3(0.0, 0.0, 0.0)
+        self.gravitational_accelaration = vec3(0.0, 0.0, 0.0)
 
         self.rpic_damping = 0.0  # 0.0 if no damping (apic). -1 if pic
 
@@ -716,10 +717,10 @@ class MPMModelStruct(object):
     def from_torch(
         self, tensor_E: Tensor, tensor_nu: Tensor, tensor_gamma: Tensor, tensor_kappa: Tensor, device="cuda:0", requires_grad=False
     ):
-        self.E = wp.from_torch(tensor_E.contiguous(), requires_grad=requires_grad)
-        self.nu = wp.from_torch(tensor_nu.contiguous(), requires_grad=requires_grad)
-        self.gamma = wp.from_torch(tensor_gamma.contiguous(), requires_grad=requires_grad)
-        self.kappa = wp.from_torch(tensor_kappa.contiguous(), requires_grad=requires_grad)
+        self.E = from_torch_safe(tensor_E.contiguous(), dtype=scalar, requires_grad=requires_grad)
+        self.nu = from_torch_safe(tensor_nu.contiguous(), dtype=scalar, requires_grad=requires_grad)
+        self.gamma = from_torch_safe(tensor_gamma.contiguous(), dtype=scalar, requires_grad=requires_grad)
+        self.kappa = from_torch_safe(tensor_kappa.contiguous(), dtype=scalar, requires_grad=requires_grad)
         n_particles = tensor_E.shape[0]
         self.finalize_mu_lam(n_particles=n_particles, device=device)
 
@@ -735,165 +736,173 @@ class MPMModelStruct(object):
 # for various boundary conditions
 @wp.struct
 class Dirichlet_collider:
-    point: wp.vec3
-    normal: wp.vec3
-    direction: wp.vec3
+    point: vec3
+    normal: vec3
+    direction: vec3
 
-    start_time: float
-    end_time: float
+    start_time: scalar
+    end_time: scalar
 
-    friction: float
+    friction: scalar
     surface_type: int
 
-    velocity: wp.vec3
+    velocity: vec3
 
-    threshold: float
+    threshold: scalar
     reset: int
     index: int
 
-    x_unit: wp.vec3
-    y_unit: wp.vec3
-    radius: float
-    v_scale: float
-    width: float
-    height: float
-    length: float
-    R: float
+    x_unit: vec3
+    y_unit: vec3
+    radius: scalar
+    v_scale: scalar
+    width: scalar
+    height: scalar
+    length: scalar
+    R: scalar
 
-    size: wp.vec3
+    size: vec3
 
-    horizontal_axis_1: wp.vec3
-    horizontal_axis_2: wp.vec3
-    half_height_and_radius: wp.vec2
+    horizontal_axis_1: vec3
+    horizontal_axis_2: vec3
+    half_height_and_radius: vec2
+
+@wp.struct
+class SimulationMesh:
+    # Native collision samples triangles directly; no fp32-only BVH is needed.
+    points: wp.array(dtype=vec3)
+    velocities: wp.array(dtype=vec3)
+    indices: wp.array(dtype=wp.int32)
+
 
 # for mesh collision
 @wp.struct
 class Mesh_collider:
-    mesh_id: wp.uint64
-    friction: float
-    weight: wp.array(dtype=float, ndim=3)
-    mesh_v_in: wp.array(dtype=wp.vec3, ndim=3)
-    mesh_v_out: wp.array(dtype=wp.vec3, ndim=3)
-    mesh_normal: wp.array(dtype=wp.vec3, ndim=3)
+    mesh: SimulationMesh
+    friction: scalar
+    weight: wp.array(dtype=scalar, ndim=3)
+    mesh_v_in: wp.array(dtype=vec3, ndim=3)
+    mesh_v_out: wp.array(dtype=vec3, ndim=3)
+    mesh_normal: wp.array(dtype=vec3, ndim=3)
 
 # for particle moving
 @wp.struct
 class Particle_mover:
-    weight: wp.array(dtype=float, ndim=3)
-    velocity: wp.array(dtype=wp.vec3, ndim=3)
+    weight: wp.array(dtype=scalar, ndim=3)
+    velocity: wp.array(dtype=vec3, ndim=3)
 
 @wp.struct
 class GridCollider:
-    point: wp.vec3
-    normal: wp.vec3
-    direction: wp.vec3
+    point: vec3
+    normal: vec3
+    direction: vec3
 
-    start_time: float
-    end_time: float
+    start_time: scalar
+    end_time: scalar
     mask: wp.array(dtype=int, ndim=3)
 
 
 @wp.struct
 class Impulse_modifier:
     # this needs to be changed for each different BC!
-    point: wp.vec3
-    normal: wp.vec3
-    start_time: float
-    end_time: float
-    force: wp.vec3
-    forceTimesDt: wp.vec3
+    point: vec3
+    normal: vec3
+    start_time: scalar
+    end_time: scalar
+    force: vec3
+    forceTimesDt: vec3
     numsteps: int
 
-    point: wp.vec3
-    size: wp.vec3
+    point: vec3
+    size: vec3
     mask: wp.array(dtype=int)
 
 
 @wp.struct
 class MPMtailoredStruct:
     # this needs to be changed for each different BC!
-    point: wp.vec3
-    normal: wp.vec3
-    start_time: float
-    end_time: float
-    friction: float
+    point: vec3
+    normal: vec3
+    start_time: scalar
+    end_time: scalar
+    friction: scalar
     surface_type: int
-    velocity: wp.vec3
-    threshold: float
+    velocity: vec3
+    threshold: scalar
     reset: int
 
-    point_rotate: wp.vec3
-    normal_rotate: wp.vec3
-    x_unit: wp.vec3
-    y_unit: wp.vec3
-    radius: float
-    v_scale: float
-    width: float
-    point_plane: wp.vec3
-    normal_plane: wp.vec3
-    velocity_plane: wp.vec3
-    threshold_plane: float
+    point_rotate: vec3
+    normal_rotate: vec3
+    x_unit: vec3
+    y_unit: vec3
+    radius: scalar
+    v_scale: scalar
+    width: scalar
+    point_plane: vec3
+    normal_plane: vec3
+    velocity_plane: vec3
+    threshold_plane: scalar
 
 
 @wp.struct
 class MaterialParamsModifier:
-    point: wp.vec3
-    size: wp.vec3
-    E: float
-    nu: float
-    density: float
+    point: vec3
+    size: vec3
+    E: scalar
+    nu: scalar
+    density: scalar
 
 
 @wp.struct
 class ParticleVelocityModifier:
-    point: wp.vec3
-    normal: wp.vec3
-    half_height_and_radius: wp.vec2
-    rotation_scale: float
-    translation_scale: float
+    point: vec3
+    normal: vec3
+    half_height_and_radius: vec2
+    rotation_scale: scalar
+    translation_scale: scalar
 
-    size: wp.vec3
+    size: vec3
 
-    horizontal_axis_1: wp.vec3
-    horizontal_axis_2: wp.vec3
+    horizontal_axis_1: vec3
+    horizontal_axis_2: vec3
 
-    start_time: float
+    start_time: scalar
 
-    end_time: float
+    end_time: scalar
 
-    velocity: wp.vec3
+    velocity: vec3
 
     mask: wp.array(dtype=int)
 
 
 @wp.kernel
 def compute_mu_lam_from_E_nu_clean(
-    mu: wp.array(dtype=float),
-    lam: wp.array(dtype=float),
-    E: wp.array(dtype=float),
-    nu: wp.array(dtype=float),
+    mu: wp.array(dtype=scalar),
+    lam: wp.array(dtype=scalar),
+    E: wp.array(dtype=scalar),
+    nu: wp.array(dtype=scalar),
 ):
     p = wp.tid()
-    mu[p] = E[p] / (2.0 * (1.0 + nu[p]))
-    lam[p] = E[p] * nu[p] / ((1.0 + nu[p]) * (1.0 - 2.0 * nu[p]))
+    mu[p] = E[p] / (scalar(2.0) * (scalar(1.0) + nu[p]))
+    lam[p] = E[p] * nu[p] / ((scalar(1.0) + nu[p]) * (scalar(1.0) - scalar(2.0) * nu[p]))
 
 
 @wp.kernel
-def set_vec3_to_zero(target_array: wp.array(dtype=wp.vec3)):
+def set_vec3_to_zero(target_array: wp.array(dtype=vec3)):
     tid = wp.tid()
-    target_array[tid] = wp.vec3(0.0, 0.0, 0.0)
+    target_array[tid] = vec3(scalar(0.0), scalar(0.0), scalar(0.0))
 
 
 @wp.kernel
 def set_vec3_to_vec3(
-    source_array: wp.array(dtype=wp.vec3), target_array: wp.array(dtype=wp.vec3)
+    source_array: wp.array(dtype=vec3), target_array: wp.array(dtype=vec3)
 ):
     tid = wp.tid()
     source_array[tid] = target_array[tid]
 
 @wp.kernel
 def set_vec3_to_vec3_offset(
-    source_array: wp.array(dtype=wp.vec3), target_array: wp.array(dtype=wp.vec3), offset: int
+    source_array: wp.array(dtype=vec3), target_array: wp.array(dtype=vec3), offset: int
 ):
     tid = wp.tid()
     source_array[tid+offset] = target_array[tid]
@@ -901,8 +910,8 @@ def set_vec3_to_vec3_offset(
 
 @wp.kernel
 def set_float_vec_to_vec_wmask(
-    source_array: wp.array(dtype=float),
-    target_array: wp.array(dtype=float),
+    source_array: wp.array(dtype=scalar),
+    target_array: wp.array(dtype=scalar),
     selection_mask: wp.array(dtype=int),
 ):
     tid = wp.tid()
@@ -912,57 +921,57 @@ def set_float_vec_to_vec_wmask(
 
 @wp.kernel
 def set_float_vec_to_vec(
-    source_array: wp.array(dtype=float), target_array: wp.array(dtype=float)
+    source_array: wp.array(dtype=scalar), target_array: wp.array(dtype=scalar)
 ):
     tid = wp.tid()
     source_array[tid] = target_array[tid]
 
 
 @wp.kernel
-def set_mat33_to_identity(target_array: wp.array(dtype=wp.mat33)):
+def set_mat33_to_identity(target_array: wp.array(dtype=mat33)):
     tid = wp.tid()
-    target_array[tid] = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    target_array[tid] = mat33(scalar(1.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(1.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(1.0))
 
 
 @wp.kernel
-def set_mat33_to_zero(target_array: wp.array(dtype=wp.mat33)):
+def set_mat33_to_zero(target_array: wp.array(dtype=mat33)):
     tid = wp.tid()
-    target_array[tid] = wp.mat33(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    target_array[tid] = mat33(scalar(0.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(0.0))
 
 
 @wp.kernel
-def add_identity_to_mat33(target_array: wp.array(dtype=wp.mat33)):
+def add_identity_to_mat33(target_array: wp.array(dtype=mat33)):
     tid = wp.tid()
     target_array[tid] = wp.add(
-        target_array[tid], wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        target_array[tid], mat33(scalar(1.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(1.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(1.0))
     )
 
 
 @wp.kernel
-def subtract_identity_to_mat33(target_array: wp.array(dtype=wp.mat33)):
+def subtract_identity_to_mat33(target_array: wp.array(dtype=mat33)):
     tid = wp.tid()
     target_array[tid] = wp.sub(
-        target_array[tid], wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        target_array[tid], mat33(scalar(1.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(1.0), scalar(0.0), scalar(0.0), scalar(0.0), scalar(1.0))
     )
 
 
 @wp.kernel
 def add_vec3_to_vec3(
-    first_array: wp.array(dtype=wp.vec3), second_array: wp.array(dtype=wp.vec3)
+    first_array: wp.array(dtype=vec3), second_array: wp.array(dtype=vec3)
 ):
     tid = wp.tid()
     first_array[tid] = wp.add(first_array[tid], second_array[tid])
 
 
 @wp.kernel
-def set_value_to_float_array(target_array: wp.array(dtype=float), value: float):
+def set_value_to_float_array(target_array: wp.array(dtype=scalar), value: scalar):
     tid = wp.tid()
     target_array[tid] = value
 
 
 @wp.kernel
 def set_warpvalue_to_float_array(
-    target_array: wp.array(dtype=float), value: wp.float32
+    target_array: wp.array(dtype=scalar), value: scalar
 ):
     tid = wp.tid()
     target_array[tid] = value
@@ -970,16 +979,16 @@ def set_warpvalue_to_float_array(
 
 @wp.kernel
 def get_float_array_product(
-    arrayA: wp.array(dtype=float),
-    arrayB: wp.array(dtype=float),
-    arrayC: wp.array(dtype=float),
+    arrayA: wp.array(dtype=scalar),
+    arrayB: wp.array(dtype=scalar),
+    arrayC: wp.array(dtype=scalar),
 ):
     tid = wp.tid()
     arrayC[tid] = arrayA[tid] * arrayB[tid]
 
 @wp.kernel
 def copy_state(
-    source_state: MPMStateStruct, target_state: MPMSmallStateStruct, particle_R_inv: wp.array(dtype=wp.vec3), d_length: int
+    source_state: MPMStateStruct, target_state: MPMSmallStateStruct, particle_R_inv: wp.array(dtype=vec3), d_length: int
     # source_state: MPMStateStruct, target_state: MPMSmallStateStruct, d_length: int
 ):
     tid = wp.tid()
