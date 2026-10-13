@@ -272,6 +272,9 @@ the precision when resuming. Appearance preparation/rendering keeps its existing
 precision. Sensitivity configs accept `"precision": "fp64"` and report the actual
 material rounding in that precision. Forward timing commands and measurements:
 [workspace README](../README.md#mpmavatar-fp64-forward-timing).
+`benchmark_forward.py --deterministic` enables `GPU_TO_GPU` before kernel imports
+and checks exact repeated losses and final `x/v/C/d` states. Both precisions pass
+on A40; the workspace table compares deterministic and ordinary forward times.
 
 `evaluation/seed0/` contains `evaluation_predictions.npz` for scoring,
 `predictions.npz` and UV meshes for the selected rendering rollout, and

@@ -1,0 +1,17 @@
+{
+  "prepared": "../data/MPMAvatar/4DDress/examples/s185_t1",
+  "garments": {
+    "upper": {"frame_start": 19, "frame_count": 12},
+    "lower": {"frame_start": 45, "frame_count": 12}
+  },
+  "center": {"D": 1.0, "E": 100.0, "H": 1.0},
+  "step_sizes": [1e-6, 1e-4, 1e-2],
+  "log_directions": ["E"],
+  "radius": 50,
+  "directions": ["D", "E", "H"],
+  "grid_size": 200,
+  "substeps": 400,
+  "precision": "fp64",
+  "deterministic": true,
+  "seed": 0
+}
