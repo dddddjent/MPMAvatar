@@ -32,7 +32,7 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -158,7 +158,7 @@ class HangSimulation:
     def sim2wld(self, p: Any) -> Any:
         return (p - self.shift) / self.scale
 
-    def rollout(self, values: dict[str, float]) -> np.ndarray:
+    def rollout(self, values: dict[str, float], observer: Callable[[int], None] | None = None) -> np.ndarray:
         """(frames + 1, vertices, 3) metres in DiffCloth vertex order; frame 0 is the flat rest state."""
         import torch
         import warp as wp
@@ -183,10 +183,14 @@ class HangSimulation:
             joint_v = torch.zeros((self.n_pinned, 3), dtype=self.init_pos.dtype, device=device)
             face_v = torch.zeros((0, 3), dtype=self.init_pos.dtype, device=device)
             frames = [self.sim2wld(self.init_pos[self.n_elements:])]
+            if observer is not None:
+                observer(0)
             for frame in range(self.config["frames"]):
-                for _ in range(substeps):
+                for substep in range(substeps):
                     solver.p2g2p(model, state, dt, mesh_x=None, mesh_v=None, joint_traditional_v=None,
                                  joint_verts_v=joint_v, joint_faces_v=face_v, device=device)
+                    if observer is not None:
+                        observer(frame * substeps + substep + 1)
                 positions = wp.to_torch(state.particle_x)[self.n_elements:]
                 assert torch.isfinite(positions).all(), f"Nonfinite simulation at frame {frame + 1}"
                 frames.append(self.sim2wld(positions).clone())
