@@ -11,6 +11,8 @@ Template commands (activate mpmavatar; from MPMAvatar):
 # python material_local_sweep.py --config configs/material_local_sweep_185.json --output output/material_local_sweep_185 --stage prepare
 # python material_local_sweep.py --output output/material_local_sweep_185 --stage run --garment upper
 # python material_local_sweep.py --output output/material_local_sweep_185 --stage summarize
+# python material_local_sweep.py --config configs/material_local_sweep_dgarments.json --output output/material_local_sweep_dgarments --stage prepare
+# python material_local_sweep.py --output output/material_local_sweep_dgarments --stage run --garment dress
 
 Run requires a GPU already available to this process (inside a Slurm job). No scheduler is invoked.
 """
@@ -22,14 +24,51 @@ import json
 import math
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from material_sensitivity import PARAMETERS, build_trainer, set_parameters, write_csv
 
+if TYPE_CHECKING:
+    from train_material_params import Trainer
+
 REPO = Path(__file__).resolve().parent
+
+
+def build_dgarments_trainer(config: dict[str, Any], output: Path, garment: str, parameter_set: str) -> "Trainer":
+    """run.py's material-stage trainer with the rest shape at frame 0 and a later fitting window."""
+    from simulation_runtime import configure_precision, configure_simulation
+
+    configure_precision(config["precision"])
+    configure_simulation(config["deterministic"])
+    from dataset_input import common_arguments, load_manifest
+    from train_material_params import Trainer, parse_args
+
+    root, appearance = Path(config["data"]), Path(config["appearance"])
+    manifest = load_manifest(root)
+    window = config["garments"][garment]
+    assert window["frame_start"] + window["frame_count"] <= len(manifest["train_frame_ids"])
+    sys.argv = [str(REPO / "train_material_params.py"), *common_arguments(root, manifest, appearance),
+                "--train_frame_start_num", str(window["frame_start"]), str(window["frame_count"]),
+                "--test_frame_start_num", str(window["frame_start"]), "2",
+                "--iterations", "200", "--output_dir", str(output / "trainer"),
+                "--save_name", f"{garment}_{parameter_set}", "--smplx_num_betas", "10",
+                "--prescribed_surface_path", str(root / manifest["prescribed_surface"]),
+                "--init_params_path", "", "--material_gradient", "ad",
+                "--grid_size", str(config["grid_size"]), "--substep", str(config["substeps"]),
+                "--precision", config["precision"], "--seed", str(config["seed"])]
+    if config["deterministic"]:
+        sys.argv.append("--deterministic")
+    args, opt, pipe, run_eval, *_ = parse_args()
+    trainer = Trainer(args, opt, pipe, run_eval)
+    assert trainer.n_traditional == 0
+    return trainer
+
+
+TRAINERS = {"4ddress": build_trainer, "dgarments": build_dgarments_trainer}
 
 
 def line_name(garment: str, direction: str, step: float) -> str:
@@ -59,9 +98,15 @@ def prepare(config_path: Path, output: Path) -> None:
     assert config_path.is_file(), config_path
     assert not output.exists(), f"Choose a fresh output: {output}"
     config = json.loads(config_path.read_text())
-    prepared = (REPO / config["prepared"]).resolve()
-    config["prepared"] = str(prepared)
-    assert (prepared / "preparation.json").is_file(), prepared
+    if config["dataset"] == "4ddress":
+        config["prepared"] = str((REPO / config["prepared"]).resolve())
+        assert (Path(config["prepared"]) / "preparation.json").is_file(), config["prepared"]
+    else:
+        assert config["dataset"] == "dgarments", config["dataset"]
+        config["data"] = str((REPO / config["data"]).resolve())
+        config["appearance"] = str((REPO / config["appearance"]).resolve())
+        assert (Path(config["data"]) / "manifest.json").is_file(), config["data"]
+        assert (Path(config["appearance"]) / "point_cloud").is_dir(), config["appearance"]
     assert config["precision"] == "fp64" and config["deterministic"]
     assert config["directions"] == list(PARAMETERS) and config["radius"] > 0
     assert set(config["log_directions"]) <= set(PARAMETERS)
@@ -85,7 +130,7 @@ def run(config: dict[str, Any], output: Path, garment: str) -> None:
 
     end = job_end()
     # build_trainer selects fp64/deterministic execution before CUDA starts.
-    trainer = build_trainer(config, output, garment, f"job{os.environ['SLURM_JOB_ID']}")
+    trainer = TRAINERS[config["dataset"]](config, output, garment, f"job{os.environ['SLURM_JOB_ID']}")
     assert torch.cuda.is_available(), "Run on a GPU; this script never requests an allocation"
     device = torch.cuda.get_device_name()
     assert trainer.particle_init_position.dtype == torch.float64
@@ -230,7 +275,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=REPO / "configs/material_local_sweep_185.json")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stage", choices=("prepare", "run", "summarize"), required=True)
-    parser.add_argument("--garment", choices=("upper", "lower"))
+    parser.add_argument("--garment", choices=("upper", "lower", "dress"))
     args = parser.parse_args()
     output = args.output.resolve()
     if args.stage == "prepare":

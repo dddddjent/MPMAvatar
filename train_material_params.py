@@ -382,7 +382,7 @@ class Trainer:
         self.train_frame_collider_velo = (self.train_frame_collider[1:] - self.train_frame_collider[:-1]) * 25
 
         if self.args.prescribed_surface_path:
-            assert self.scene.train_frame_start == self.verts_start_idx == 0
+            assert self.verts_start_idx == 0  # body motion starts at frame 0; windows index it by absolute frame
             end = max(self.scene.train_frame_index[-1], self.scene.test_frame_index[-1])
             self.motion_frame_ids = list(range(end + 1))
             body = []

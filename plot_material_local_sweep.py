@@ -2,6 +2,7 @@
 
 Activate mpmavatar; run from MPMAvatar on an owned CPU allocation after summarize:
 # python plot_material_local_sweep.py --output output/material_local_sweep_185
+# python plot_material_local_sweep.py --output output/material_local_sweep_dgarments
 """
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ def plot(output: Path) -> None:
                         axis.set_ylabel(metric)
                         axis.grid(color="0.9", linewidth=0.6)
                         axis.ticklabel_format(axis="y", style="sci", scilimits=(-3, 3), useOffset=True)
-                figure.suptitle(f"185 Take1 {garment}, frames {window['frame_start']}–"
+                figure.suptitle(f"{config['title']} {garment}, frames {window['frame_start']}–"
                                 f"{window['frame_start'] + window['frame_count'] - 1}: {title}\n"
                                 f"center D/E/H = {config['center']['D']}/{config['center']['E']}/{config['center']['H']}, "
                                 f"fp64 deterministic, k = ±{config['radius']}; ln steps for {', '.join(config['log_directions'])}, linear otherwise")
