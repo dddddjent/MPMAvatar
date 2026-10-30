@@ -135,6 +135,7 @@ def plot(output: Path) -> None:
     axes[1, 0].set_title("Adjacent trajectories")
     axes[1, 0].set_xlabel("Pair midpoint k + 0.5")
     axes[1, 0].set_ylabel("Trajectory RMS separation (µm)")
+    axes[1, 0].ticklabel_format(axis="y", style="sci", scilimits=(0, 0), useOffset=False)
     for row in sorted(adjacent, key=lambda r: r["trajectory_rms_mm"], reverse=True)[:3]:
         a, b = row["left"], row["right"]
         distance = trajectories[b] - trajectories[a]
@@ -178,16 +179,18 @@ def plot(output: Path) -> None:
         axes[1, 1].legend()
     for axis in axes.flat:
         axis.grid(True, alpha=0.25)
+    axes[1, 0].set_ylim(bottom=0, top=1.1 * axes[1, 0].get_ylim()[1])
     normalization = f"C2 mass band {config['mass_band']}" if "mass_band" in config else "hard mass cutoff"
-    figure.suptitle(f"Controlled-shear hang-heavy: ln(E) = ln(100) + k × {step:g}, |k| ≤ {radius}\n"
-                   f"{len(rows)}/{2 * radius + 1} points; fp64 deterministic; 400 substeps/frame; {normalization}")
+    figure.suptitle(f"Shear release | {Path(config['data']).name}: ln(E) = ln(100) + k × {step:g}, |k| ≤ {radius}\n"
+                   f"{len(rows)}/{2 * radius + 1} points; {config['native']['grid_size']}³ grid; fp64 deterministic; "
+                   f"{config['native']['substeps']} substeps/frame; {normalization}")
     temporary = output / f"sweep.{os.getpid()}.tmp.png"
     figure.savefig(temporary, dpi=170)
     temporary.replace(output / "sweep.png")
     temporary = output / f"sweep.{os.getpid()}.tmp.pdf"
     with PdfPages(temporary) as pdf:
         pdf.savefig(figure)
-        if "mass_band" in config:
+        if "mass_band" in config and "comparison_baseline" in config:
             from probe_hang_mass_band import center_figure, equation_figure
 
             equation = equation_figure()
